@@ -14,9 +14,14 @@ omapass uses the gnome-keyring, clipboard, and typing tools that already ship wi
 
 **No sudo or pkexec is required.**
 
-## Usage
 
-Click the Passwords widget to open the panel. Search; Enter copies the password; Shift+Enter types it into the focused window. `+` or Ctrl+N opens the add form with Account | Nostr tabs. Account tab: Folder, Account, Password (eye toggle + generate password). Nostr tab: nickname and folder (empty folder becomes Nostr); Generate key stores nsec locally with kind=nostr and never shows it or uploads it to a relay. Overflow Remove asks for confirmation.
+## Keyboard
+
+- **Open:** click the widget or `omarchy-shell shell summon io.github.this-is-npc.omapass '{}'`
+- **Search:** `/`; list with arrow keys or `j`/`k`; **Enter** copies password; **Shift+Enter** types into the focused window; **Escape** closes or clears
+- **Add:** `+` or **Ctrl+N**
+- **Add form:** **Left/Right** switches Account | Nostr; **Ctrl+G** generates password or Nostr key; **Ctrl+E** show/hide password; **Enter** saves (Account) or generates key (Nostr); **Escape** cancels
+- **Row menu:** `m` or **Right** opens overflow; **Delete** or `x` removes (with confirmation); in confirm dialog: **Enter**, **Escape**, **Tab**
 
 CLI:
 

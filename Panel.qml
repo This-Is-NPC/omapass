@@ -38,6 +38,8 @@ Panel {
   property string confirmAction: ""
   property var pendingRemoveRecord: null
 
+  signal openOverflowForRow(int rowIndex)
+
   property bool savedFlash: false
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
@@ -81,8 +83,10 @@ Panel {
       if (root.opened) {
         if (view === "list")
           searchField.forceActiveFocus()
-        else
-          folderField.forceActiveFocus()
+        else {
+          focusSection = "addKind"
+          keyCatcher.forceActiveFocus()
+        }
       }
     })
   }
@@ -186,8 +190,9 @@ Panel {
     addPassword = ""
     addError = ""
     addPasswordVisible = false
+    focusSection = "addKind"
     Qt.callLater(function() {
-      if (root.opened) folderField.forceActiveFocus()
+      if (root.opened) keyCatcher.forceActiveFocus()
     })
   }
 
@@ -346,6 +351,11 @@ Panel {
     typeRecord(currentRecord())
   }
 
+  function openSelectedOverflow() {
+    if (root.view !== "list" || !currentRecord()) return
+    root.openOverflowForRow(listIndex)
+  }
+
   function handleEnter(event) {
     if (event.modifiers & Qt.ShiftModifier || event.modifiers & Qt.ControlModifier)
       typeSelected()
@@ -414,11 +424,25 @@ Panel {
   }
 
   Shortcut {
+    sequences: ["Ctrl+N"]
+    enabled: root.opened && !folderField.activeFocus && !accountField.activeFocus && !passwordField.activeFocus
+    onActivated: root.openAddView()
+  }
+
+  Shortcut {
+    sequences: ["Delete"]
+    enabled: root.opened && root.view === "list" && root.focusSection === "list"
+             && !searchField.activeFocus && !root.actionsMenuOpen && !root.confirmOpen
+    onActivated: root.removeRecord(root.currentRecord())
+  }
+
+  Shortcut {
     sequences: ["Shift+Return", "Shift+Enter", "Ctrl+Return", "Ctrl+Enter"]
     enabled: root.opened && root.view === "list" && !searchField.activeFocus
              && !folderField.activeFocus && !accountField.activeFocus && !passwordField.activeFocus
     onActivated: root.typeSelected()
   }
+
 
   KeyboardPanel {
     id: panel
@@ -432,12 +456,57 @@ Panel {
     contentHeight: panel.fittedContentHeight(Style.space(480), Style.space(800))
 
     PanelKeyCatcher {
+
+      Keys.onPressed: function(event) {
+        if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_N) {
+          if (!searchField.activeFocus && !folderField.activeFocus
+              && !accountField.activeFocus && !passwordField.activeFocus) {
+            root.openAddView()
+            event.accepted = true
+          }
+          return
+        }
+        if (root.view === "add" && root.focusSection === "addKind" && !root.confirmOpen) {
+          if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_G) {
+            if (root.addKind === "nostr") root.generateNostrKey()
+            else root.generateAddPassword()
+            event.accepted = true
+            return
+          }
+          if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_E && root.addKind === "account") {
+            root.addPasswordVisible = !root.addPasswordVisible
+            event.accepted = true
+            return
+          }
+          if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_1) {
+            root.addKind = "account"
+            event.accepted = true
+            return
+          }
+          if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_2) {
+            root.addKind = "nostr"
+            event.accepted = true
+            return
+          }
+        }
+        if (root.confirmOpen && confirmDialog.handleKey(event))
+          event.accepted = true
+      }
       id: keyCatcher
       anchors.fill: parent
       blocked: searchField.activeFocus || folderField.activeFocus || accountField.activeFocus
-               || passwordField.activeFocus || root.actionsMenuOpen || root.confirmOpen
+               || passwordField.activeFocus || root.actionsMenuOpen
 
       onMoveRequested: function(dx, dy) {
+        if (root.confirmOpen) {
+          confirmDialog.selectedIndex = confirmDialog.selectedIndex === 0 ? 1 : 0
+          return
+        }
+        if (root.view === "add") {
+          if (root.focusSection === "addKind" && dx !== 0)
+            root.addKind = root.addKind === "account" ? "nostr" : "account"
+          return
+        }
         if (root.view !== "list") return
         if (root.focusSection === "folders") {
           if (dx !== 0)
@@ -453,28 +522,77 @@ Panel {
             root.focusSection = "folders"
           return
         }
-        if (root.focusSection === "list" && dy !== 0)
-          root.selectRow(dy)
+        if (root.focusSection === "list") {
+          if (dx > 0) {
+            root.openSelectedOverflow()
+            return
+          }
+          if (dy !== 0)
+            root.selectRow(dy)
+        }
       }
 
       onCloseRequested: root.handleEscape()
-      onTabRequested: function(direction) { root.switchPanel(direction) }
+      onTabRequested: function(direction) {
+        if (root.confirmOpen) {
+          confirmDialog.selectedIndex = confirmDialog.selectedIndex === 0 ? 1 : 0
+          return
+        }
+        if (root.view === "add" && root.focusSection === "addKind") {
+          folderField.forceActiveFocus()
+          return
+        }
+        root.switchPanel(direction)
+      }
 
       onTextKey: function(t) {
+        if (root.confirmOpen) return
+        if (t === "+" && root.view === "list") {
+          root.openAddView()
+          return
+        }
         if (root.view !== "list") return
         if (t === "/")
           searchField.forceActiveFocus()
+        else if (t === "m" || t === "M")
+          root.openSelectedOverflow()
         else if (t === "u" || t === "U")
           root.copyAccountSelected()
         else if (t === "p" || t === "P")
           root.copySelected()
         else if (t === "t" || t === "T")
           root.typeSelected()
+        else if ((t === "x" || t === "X") && root.focusSection === "list")
+          root.removeRecord(root.currentRecord())
+      }
+
+      onDeleteRequested: {
+        if (root.confirmOpen) return
+        if (root.view === "list" && root.focusSection === "list")
+          root.removeRecord(root.currentRecord())
       }
 
       onActivateRequested: {
+        if (root.confirmOpen) {
+          if (confirmDialog.selectedIndex === 0)
+            root.closeConfirm()
+          else
+            root.handleConfirm()
+          return
+        }
         if (root.view === "add") {
-          if (passwordField.activeFocus) root.saveAdd()
+          if (root.focusSection === "addKind") {
+            folderField.forceActiveFocus()
+            return
+          }
+          if (passwordField.activeFocus) {
+            root.saveAdd()
+            return
+          }
+          if (accountField.activeFocus && root.addKind === "nostr") {
+            root.generateNostrKey()
+            return
+          }
           return
         }
         if (root.focusSection === "folders") {
@@ -611,7 +729,7 @@ Panel {
               foreground: root.foreground
               fontFamily: contentFontFamily
               bordered: true
-              active: root.addKind === "account"
+              hasCursor: root.focusSection === "addKind" && root.addKind === "account"
               onClicked: root.addKind = "account"
             }
 
@@ -621,7 +739,7 @@ Panel {
               foreground: root.foreground
               fontFamily: contentFontFamily
               bordered: true
-              active: root.addKind === "nostr"
+              hasCursor: root.focusSection === "addKind" && root.addKind === "nostr"
               onClicked: root.addKind = "nostr"
             }
           }
@@ -631,11 +749,29 @@ Panel {
             width: parent.width
             placeholderText: "Folder"
             text: root.addFolder
-            font.family: contentFontFamily
             foreground: root.foreground
             onTextChanged: root.addFolder = text
+            onActiveFocusChanged: if (activeFocus) root.focusSection = "addFields"
             Keys.onPressed: function(event) {
-              if (event.key === Qt.Key_Escape) {
+              if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_G) {
+                if (root.addKind === "nostr") root.generateNostrKey()
+                else root.generateAddPassword()
+                event.accepted = true
+              } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_1) {
+                root.addKind = "account"
+                event.accepted = true
+              } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_2) {
+                root.addKind = "nostr"
+                event.accepted = true
+              } else if (event.key === Qt.Key_Tab) {
+                if (event.modifiers & Qt.ShiftModifier) {
+                  root.focusSection = "addKind"
+                  keyCatcher.forceActiveFocus()
+                } else {
+                  accountField.forceActiveFocus()
+                }
+                event.accepted = true
+              } else if (event.key === Qt.Key_Escape) {
                 root.cancelAdd()
                 event.accepted = true
               }
@@ -648,10 +784,31 @@ Panel {
             placeholderText: root.addKind === "nostr" ? "Nickname" : "Account or nickname"
             text: root.addAccount
             font.family: contentFontFamily
-            foreground: root.foreground
             onTextChanged: root.addAccount = text
+            onActiveFocusChanged: if (activeFocus) root.focusSection = "addFields"
             Keys.onPressed: function(event) {
-              if (event.key === Qt.Key_Escape) {
+              if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_G) {
+                if (root.addKind === "nostr") root.generateNostrKey()
+                else root.generateAddPassword()
+                event.accepted = true
+              } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_1) {
+                root.addKind = "account"
+                event.accepted = true
+              } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_2) {
+                root.addKind = "nostr"
+                event.accepted = true
+              } else if (event.key === Qt.Key_Tab) {
+                if (event.modifiers & Qt.ShiftModifier)
+                  folderField.forceActiveFocus()
+                else if (root.addKind === "account")
+                  passwordField.forceActiveFocus()
+                event.accepted = true
+              } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
+                if (root.addKind === "nostr") {
+                  root.generateNostrKey()
+                  event.accepted = true
+                }
+              } else if (event.key === Qt.Key_Escape) {
                 root.cancelAdd()
                 event.accepted = true
               }
@@ -670,10 +827,25 @@ Panel {
               password: !root.addPasswordVisible
               text: root.addPassword
               font.family: contentFontFamily
-              foreground: root.foreground
               onTextChanged: root.addPassword = text
+              onActiveFocusChanged: if (activeFocus) root.focusSection = "addFields"
               Keys.onPressed: function(event) {
-                if (event.key === Qt.Key_Escape) {
+                if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_G) {
+                  root.generateAddPassword()
+                  event.accepted = true
+                } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_E) {
+                  root.addPasswordVisible = !root.addPasswordVisible
+                  event.accepted = true
+                } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_1) {
+                  root.addKind = "account"
+                  event.accepted = true
+                } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_2) {
+                  root.addKind = "nostr"
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier)) {
+                  accountField.forceActiveFocus()
+                  event.accepted = true
+                } else if (event.key === Qt.Key_Escape) {
                   root.cancelAdd()
                   event.accepted = true
                 } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
@@ -965,6 +1137,19 @@ Panel {
       actionsPopup.open()
     }
 
+    function scrollIntoView() {
+      if (row.rowIndex !== root.listIndex) return
+      var pos = row.mapToItem(listColumn, 0, 0)
+      var viewTop = listFlick.contentY
+      var viewBottom = viewTop + listFlick.height
+      var itemTop = pos.y
+      var itemBottom = pos.y + row.height
+      if (itemTop < viewTop)
+        listFlick.contentY = Math.max(0, itemTop)
+      else if (itemBottom > viewBottom)
+        listFlick.contentY = Math.min(listFlick.contentHeight - listFlick.height, itemBottom - listFlick.height)
+    }
+
     function moveMenuCursor(delta) {
       if (menuOptions.length === 0) return
       menuIndex = (menuIndex + delta + menuOptions.length) % menuOptions.length
@@ -989,6 +1174,18 @@ Panel {
     HoverHandler {
       cursorShape: Qt.PointingHandCursor
       onHoveredChanged: if (hovered && row.rowIndex >= 0) root.setListCursor(row.rowIndex)
+    }
+
+    Connections {
+      target: root
+      function onListIndexChanged() {
+        if (row.rowIndex === root.listIndex)
+          Qt.callLater(row.scrollIntoView)
+      }
+      function onOpenOverflowForRow(idx) {
+        if (idx === row.rowIndex)
+          row.openActionsMenu()
+      }
     }
 
     RowLayout {
