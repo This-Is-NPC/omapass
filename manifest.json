@@ -1,0 +1,18 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.this-is-npc.omapass",
+  "name": "omapass",
+  "version": "0.1.0",
+  "author": "howl",
+  "license": "MIT",
+  "description": "100% local. List, copy, and type logins from the native keyring.",
+  "kinds": ["bar-widget"],
+  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "barWidget": {
+    "displayName": "Passwords",
+    "description": "100% local. Search logins, Enter copies, Shift+Enter types",
+    "category": "Productivity",
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}

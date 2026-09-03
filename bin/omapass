@@ -1,0 +1,611 @@
+#!/usr/bin/env bash
+set -euo pipefail
+
+readonly SERVICE=omapass
+readonly NOSTR_ACCOUNT='nostr:default'
+readonly NOSTR_FOLDER='Nostr'
+
+die() {
+	printf '%s\n' "$*" >&2
+	exit 1
+}
+
+usage() {
+	cat <<'EOF'
+Usage: omapass <command> [options]
+
+Commands:
+  list [--json]                 List saved logins (account + folder)
+  get [--] <account>            Print secret to stdout
+  add --account <id> --folder <name>
+                                Store a secret (stdin or prompt)
+  rm [--] <account>             Remove a saved login
+  copy [--] <account>           Copy secret to clipboard (wl-copy)
+  type [--] <account>           Type secret into focused window (wtype)
+  nostr new [--account <id>] [--folder <name>]
+                                Generate and store a Nostr key
+  nostr show-npub [<account>]   Print npub (default account: nostr:default)
+  nostr show-nsec [<account>]   Reveal nsec after interactive confirmation
+  nostr rm [<account>]          Remove stored Nostr key (default: nostr:default)
+
+Options:
+  -h, --help                    Show this help
+EOF
+}
+
+require_cmd() {
+	command -v "$1" >/dev/null 2>&1 || die "missing required command: $1"
+}
+
+take_account() {
+	if (($# == 0)); then
+		usage
+		exit 1
+	fi
+	if [[ "$1" == '--' ]]; then
+		shift
+	fi
+	if (($# != 1)) || [[ -z "${1:-}" ]]; then
+		die "expected exactly one account argument"
+	fi
+	printf '%s' "$1"
+}
+
+take_optional_account() {
+	local default=$1
+	shift
+	if (($# > 0)) && [[ "$1" == '--' ]]; then
+		shift
+	fi
+	if (($# == 0)); then
+		printf '%s' "$default"
+		return
+	fi
+	if (($# != 1)) || [[ -z "${1:-}" ]]; then
+		die "expected at most one account argument"
+	fi
+	printf '%s' "$1"
+}
+
+keyring_lookup() {
+	local account=$1
+	secret-tool lookup service "$SERVICE" account "$account"
+}
+
+keyring_exists() {
+	local account=$1
+	secret-tool lookup service "$SERVICE" account "$account" >/dev/null 2>&1
+}
+
+keyring_store() {
+	local account=$1 folder=$2 kind=${3:-}
+	if [[ -n "$kind" ]]; then
+		secret-tool store --label="$folder" service "$SERVICE" account "$account" kind "$kind"
+	else
+		secret-tool store --label="$folder" service "$SERVICE" account "$account"
+	fi
+}
+
+keyring_clear() {
+	local account=$1
+	secret-tool clear service "$SERVICE" account "$account"
+}
+
+read_secret_value() {
+	local secret confirm
+	if [[ -t 0 ]]; then
+		read -r -s -p 'Password: ' secret >&2
+		printf '\n' >&2
+		read -r -s -p 'Confirm: ' confirm >&2
+		printf '\n' >&2
+		[[ "$secret" == "$confirm" ]] || die 'passwords do not match'
+	else
+		secret=$(cat)
+	fi
+	printf '%s' "$secret"
+}
+
+cmd_list() {
+	local json=0
+	while (($# > 0)); do
+		case "$1" in
+		--json) json=1 ;;
+		-h | --help)
+			usage
+			exit 0
+			;;
+		*) die "unknown list option: $1" ;;
+		esac
+		shift
+	done
+
+	local search_out
+	if ! search_out=$(secret-tool search --all service "$SERVICE" 2>&1); then
+		die "keyring unavailable (is it locked?)"
+	fi
+
+	if ((json == 1)); then
+		printf '%s' "$search_out" | python3 -c '
+import json, sys
+
+entries = {}
+current = {}
+
+def flush():
+    account = current.get("account")
+    if account:
+        entries[account] = current.get("folder", "")
+
+for raw in sys.stdin:
+    line = raw.rstrip("\n")
+    if not line.strip():
+        flush()
+        current = {}
+        continue
+    if line.startswith("label = "):
+        current["folder"] = line[8:]
+    elif line.startswith("attribute.account = "):
+        current["account"] = line[20:]
+
+flush()
+rows = [{"account": a, "folder": entries[a]} for a in sorted(entries)]
+print(json.dumps(rows, ensure_ascii=False))
+'
+	else
+		printf '%s' "$search_out" | python3 -c '
+import sys
+
+entries = {}
+current = {}
+
+def flush():
+    account = current.get("account")
+    if account:
+        entries[account] = current.get("folder", "")
+
+for raw in sys.stdin:
+    line = raw.rstrip("\n")
+    if not line.strip():
+        flush()
+        current = {}
+        continue
+    if line.startswith("label = "):
+        current["folder"] = line[8:]
+    elif line.startswith("attribute.account = "):
+        current["account"] = line[20:]
+
+flush()
+for account in sorted(entries):
+    print(f"{account}\t{entries[account]}")
+'
+	fi
+}
+
+cmd_get() {
+	local account
+	account=$(take_account "$@")
+	keyring_lookup "$account"
+}
+
+cmd_add() {
+	local account= folder=
+	while (($# > 0)); do
+		case "$1" in
+		--account)
+			shift
+			account=${1:-}
+			;;
+		--folder | --label)
+			shift
+			folder=${1:-}
+			;;
+		-h | --help)
+			usage
+			exit 0
+			;;
+		*)
+			die "unknown add option: $1"
+			;;
+		esac
+		shift
+	done
+
+	[[ -n "$account" ]] || die 'add requires --account'
+	[[ -n "$folder" ]] || die 'add requires --folder'
+
+	read_secret_value | keyring_store "$account" "$folder"
+}
+
+cmd_rm() {
+	local account
+	account=$(take_account "$@")
+	keyring_clear "$account"
+}
+
+cmd_copy() {
+	require_cmd wl-copy
+	local account secret
+	account=$(take_account "$@")
+	secret=$(keyring_lookup "$account")
+	printf '%s' "$secret" | wl-copy
+}
+
+cmd_type() {
+	require_cmd wtype
+	local account secret
+	account=$(take_account "$@")
+	secret=$(keyring_lookup "$account")
+	printf '%s' "$secret" | wtype -
+}
+
+nostr_python() {
+	python3 -
+}
+
+nostr_new_usage() {
+	cat <<'EOF'
+Usage: omapass nostr new [--account <id>] [--folder <name>]
+
+Generate and store a Nostr secret key.
+
+Options:
+  --account <id>   Keyring account nickname (default: nostr:default)
+  --folder <name>  Folder label in the vault (default: Nostr)
+  -h, --help       Show this help
+EOF
+}
+
+nostr_new() {
+	require_cmd openssl
+	local account=$NOSTR_ACCOUNT folder=$NOSTR_FOLDER
+	while (($# > 0)); do
+		case "$1" in
+		--account)
+			shift
+			account=${1:-}
+			;;
+		--folder)
+			shift
+			folder=${1:-}
+			;;
+		-h | --help)
+			nostr_new_usage
+			exit 0
+			;;
+		*)
+			die "unknown nostr new option: $1"
+			;;
+		esac
+		shift
+	done
+
+	account=${account:-$NOSTR_ACCOUNT}
+	folder=${folder:-$NOSTR_FOLDER}
+
+	if keyring_exists "$account"; then
+		die "nostr key already exists ($account)"
+	fi
+
+	local result
+	result=$(
+		nostr_python <<'PY'
+import os
+
+CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+GEN = [0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3]
+
+
+def polymod(values):
+    chk = 1
+    for v in values:
+        b = chk >> 25
+        chk = ((chk & 0x1FFFFFF) << 5) ^ v
+        for i in range(5):
+            if (b >> i) & 1:
+                chk ^= GEN[i]
+    return chk
+
+
+def hrp_expand(hrp):
+    return [ord(x) >> 5 for x in hrp] + [0] + [ord(x) & 31 for x in hrp]
+
+
+def create_checksum(hrp, data):
+    values = hrp_expand(hrp) + data
+    mod = polymod(values + [0] * 6) ^ 1
+    return [(mod >> 5 * (5 - i)) & 31 for i in range(6)]
+
+
+def bech32_encode(hrp, data):
+    combined = data + create_checksum(hrp, data)
+    return hrp + "1" + "".join(CHARSET[d] for d in combined)
+
+
+def convertbits(data, frombits, tobits, pad=True):
+    acc = bits = 0
+    ret = []
+    maxv = (1 << tobits) - 1
+    for value in data:
+        acc = (acc << frombits) | value
+        bits += frombits
+        while bits >= tobits:
+            bits -= tobits
+            ret.append((acc >> bits) & maxv)
+    if pad:
+        if bits:
+            ret.append((acc << (tobits - bits)) & maxv)
+    elif bits >= frombits or ((acc << (tobits - bits)) & maxv):
+        return None
+    return ret
+
+
+def nsec_encode(raw32):
+    data = convertbits(raw32, 8, 5, True)
+    if data is None:
+        raise SystemExit("failed to encode nsec")
+    return bech32_encode("nsec", data)
+
+
+def has_nostr_crypto():
+    for name in ("coincurve", "nak", "secp256k1"):
+        try:
+            __import__(name)
+            return name
+        except ImportError:
+            pass
+    return None
+
+
+def npub_from_sk(raw32):
+    backend = has_nostr_crypto()
+    if not backend:
+        return None
+    if backend == "coincurve":
+        from coincurve import PrivateKey
+
+        xonly = PrivateKey(raw32).public_key.format(compressed=True)[1:]
+    elif backend == "nak":
+        import nak
+
+        xonly = bytes(nak.PrivateKey(bytes(raw32)).public_key)[1:]
+    else:
+        import secp256k1
+
+        xonly = secp256k1.PrivateKey(raw32, raw=True).pubkey.serialize(compressed=True)[1:]
+    data = convertbits(xonly, 8, 5, True)
+    return bech32_encode("npub", data)
+
+
+sk = os.urandom(32)
+nsec = nsec_encode(sk)
+npub = npub_from_sk(sk)
+print(nsec)
+if npub:
+    print("NPUB:" + npub)
+else:
+    print("NOTE: install coincurve, nak, or secp256k1 to derive npub (omapass nostr show-npub)")
+PY
+	)
+
+	local nsec_line npub_line note_line
+	nsec_line=$(printf '%s\n' "$result" | sed -n '1p')
+	npub_line=$(printf '%s\n' "$result" | sed -n '/^NPUB:/p' | head -n1 || true)
+	note_line=$(printf '%s\n' "$result" | sed -n '/^NOTE:/p' | head -n1 || true)
+
+	[[ -n "$nsec_line" ]] || die 'failed to generate nostr key'
+
+	printf '%s' "$nsec_line" | keyring_store "$account" "$folder" nostr
+
+	if [[ -n "$npub_line" ]]; then
+		printf '%s\n' "${npub_line#NPUB:}"
+	elif [[ -n "$note_line" ]]; then
+		printf '%s\n' "${note_line#NOTE: }"
+	fi
+}
+
+nostr_show_npub() {
+	local account stored
+	account=$(take_optional_account "$NOSTR_ACCOUNT" "$@")
+	stored=$(keyring_lookup "$account")
+
+	printf '%s' "$stored" | python3 /dev/fd/3 3<<'PY'
+import sys
+
+stored = sys.stdin.read()
+CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+GEN = [0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3]
+
+
+def polymod(values):
+    chk = 1
+    for v in values:
+        b = chk >> 25
+        chk = ((chk & 0x1FFFFFF) << 5) ^ v
+        for i in range(5):
+            if (b >> i) & 1:
+                chk ^= GEN[i]
+    return chk
+
+
+def hrp_expand(hrp):
+    return [ord(x) >> 5 for x in hrp] + [0] + [ord(x) & 31 for x in hrp]
+
+
+def bech32_decode(bech):
+    if any(ord(x) < 33 or ord(x) > 126 for x in bech):
+        return None, None
+    bech = bech.lower()
+    pos = bech.rfind("1")
+    if pos < 1 or pos + 7 > len(bech):
+        return None, None
+    hrp = bech[:pos]
+    data = []
+    for c in bech[pos + 1 :]:
+        idx = CHARSET.find(c)
+        if idx == -1:
+            return None, None
+        data.append(idx)
+    if polymod(hrp_expand(hrp) + data) != 1:
+        return None, None
+    return hrp, data[:-6]
+
+
+def convertbits(data, frombits, tobits, pad=False):
+    acc = bits = 0
+    ret = []
+    maxv = (1 << tobits) - 1
+    for value in data:
+        acc = (acc << frombits) | value
+        bits += frombits
+        while bits >= tobits:
+            bits -= tobits
+            ret.append((acc >> bits) & maxv)
+    if not pad:
+        if bits >= frombits or ((acc << (tobits - bits)) & maxv):
+            return None
+    elif bits:
+        ret.append((acc << (tobits - bits)) & maxv)
+    return ret
+
+
+def bech32_encode(hrp, data):
+    values = hrp_expand(hrp) + data
+    mod = polymod(values + [0] * 6) ^ 1
+    checksum = [(mod >> 5 * (5 - i)) & 31 for i in range(6)]
+    combined = data + checksum
+    return hrp + "1" + "".join(CHARSET[d] for d in combined)
+
+
+def parse_secret(stored):
+    stored = stored.strip()
+    if stored.startswith("nsec1"):
+        hrp, data = bech32_decode(stored)
+        if hrp != "nsec" or data is None:
+            raise SystemExit("stored nostr key is not valid nsec1")
+        raw = convertbits(data, 5, 8, False)
+        if raw is None or len(raw) != 32:
+            raise SystemExit("stored nostr key is not valid nsec1")
+        return bytes(raw)
+    if len(stored) == 64 and all(c in "0123456789abcdefABCDEF" for c in stored):
+        return bytes.fromhex(stored)
+    raise SystemExit("stored nostr key format not recognized (expected nsec1 or 64-char hex)")
+
+
+def has_nostr_crypto():
+    for name in ("coincurve", "nak", "secp256k1"):
+        try:
+            __import__(name)
+            return name
+        except ImportError:
+            pass
+    return None
+
+
+def npub_from_sk(raw32):
+    backend = has_nostr_crypto()
+    if not backend:
+        return None
+    if backend == "coincurve":
+        from coincurve import PrivateKey
+
+        xonly = PrivateKey(raw32).public_key.format(compressed=True)[1:]
+    elif backend == "nak":
+        import nak
+
+        xonly = bytes(nak.PrivateKey(bytes(raw32)).public_key)[1:]
+    else:
+        import secp256k1
+
+        xonly = secp256k1.PrivateKey(raw32, raw=True).pubkey.serialize(compressed=True)[1:]
+    data = convertbits(xonly, 8, 5, True)
+    return bech32_encode("npub", data)
+
+
+sk = parse_secret(stored)
+npub = npub_from_sk(sk)
+if not npub:
+    raise SystemExit("npub requires coincurve, nak, or secp256k1")
+print(npub)
+PY
+}
+
+nostr_show_nsec() {
+	[[ -t 0 ]] || die 'nostr show-nsec requires an interactive terminal'
+	local account answer
+	account=$(take_optional_account "$NOSTR_ACCOUNT" "$@")
+	printf 'Type yes to reveal the Nostr secret key: ' >&2
+	read -r answer
+	[[ "$answer" == yes ]] || die 'confirmation failed'
+
+	keyring_lookup "$account"
+	printf '\n'
+}
+
+nostr_rm() {
+	local account
+	account=$(take_optional_account "$NOSTR_ACCOUNT" "$@")
+	keyring_clear "$account"
+}
+
+cmd_nostr() {
+	local sub=${1:-}
+	shift || true
+	case "$sub" in
+	new) nostr_new "$@" ;;
+	show-npub) nostr_show_npub "$@" ;;
+	show-nsec) nostr_show_nsec "$@" ;;
+	rm) nostr_rm "$@" ;;
+	-h | --help | '')
+		usage
+		exit 0
+		;;
+	*) die "unknown nostr subcommand: $sub" ;;
+	esac
+}
+
+main() {
+	if (($# == 0)); then
+		usage
+		exit 1
+	fi
+
+	case "${1:-}" in
+	-h | --help)
+		usage
+		exit 0
+		;;
+	list)
+		shift
+		cmd_list "$@"
+		;;
+	get)
+		shift
+		cmd_get "$@"
+		;;
+	add)
+		shift
+		cmd_add "$@"
+		;;
+	rm)
+		shift
+		cmd_rm "$@"
+		;;
+	copy)
+		shift
+		cmd_copy "$@"
+		;;
+	type)
+		shift
+		cmd_type "$@"
+		;;
+	nostr)
+		shift
+		cmd_nostr "$@"
+		;;
+	*)
+		die "unknown command: ${1:-}"
+		;;
+	esac
+}
+
+main "$@"
