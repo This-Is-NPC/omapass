@@ -37,6 +37,17 @@ Panel {
   property string confirmConfirmText: "Confirm"
   property string confirmAction: ""
   property var pendingRemoveRecord: null
+  property var focusSnapshot: null
+  property bool popoutSwitchClosing: false
+
+  function wipeSensitiveState() {
+    vault.forgetSecrets()
+    addPassword = ""
+    addPasswordVisible = false
+    if (passwordField)
+      passwordField.text = ""
+  }
+
 
   signal openOverflowForRow(int rowIndex)
 
@@ -77,22 +88,25 @@ Panel {
   }
 
   function open() {
-    vault.refresh()
-    root.controller.show()
-    Qt.callLater(function() {
-      if (root.opened) {
-        if (view === "list")
-          searchField.forceActiveFocus()
-        else {
-          focusSection = "addKind"
-          keyCatcher.forceActiveFocus()
+    vault.captureFocus(function(snap) {
+      root.focusSnapshot = snap
+      vault.refresh()
+      root.controller.show()
+      Qt.callLater(function() {
+        if (root.opened) {
+          if (view === "list")
+            searchField.forceActiveFocus()
+          else {
+            focusSection = "addKind"
+            keyCatcher.forceActiveFocus()
+          }
         }
-      }
+      })
     })
   }
 
   function close() {
-    vault.forgetSecrets()
+    wipeSensitiveState()
     closeConfirm()
     searchText = ""
     selectedIndex = 0
@@ -107,12 +121,23 @@ Panel {
     focusSection = "search"
     addFolder = ""
     addAccount = ""
-    addPassword = ""
     addError = ""
     addKind = "account"
-    addPasswordVisible = false
+    focusSnapshot = null
     root.controller.hide()
   }
+  function closeForPopoutSwitch() {
+    wipeSensitiveState()
+    closeConfirm()
+    addFolder = ""
+    addAccount = ""
+    addKind = "account"
+    focusSnapshot = null
+    if ("popoutSwitchClosing" in root)
+      popoutSwitchClosing = true
+    root.controller.hide()
+  }
+
 
   function toggle() {
     if (root.opened) root.close()
@@ -197,13 +222,11 @@ Panel {
   }
 
   function cancelAdd() {
-    vault.forgetSecrets()
-    addPassword = ""
+    wipeSensitiveState()
     addFolder = ""
     addAccount = ""
     addError = ""
     addKind = "account"
-    addPasswordVisible = false
     view = "list"
     Qt.callLater(function() {
       if (root.opened) searchField.forceActiveFocus()
@@ -212,9 +235,12 @@ Panel {
 
   function saveAdd() {
     addError = ""
-    vault.store(addAccount, addFolder, addPassword, function(ok, err) {
+    var secret = addPassword
+    addPassword = ""
+    if (passwordField)
+      passwordField.text = ""
+    vault.store(addAccount, addFolder, secret, function(ok, err) {
       if (ok) {
-        addPassword = ""
         addFolder = ""
         addAccount = ""
         addError = ""
@@ -243,7 +269,16 @@ Panel {
 
   function typeRecord(record) {
     if (!record) return
-    vault.type(record.account, function() { root.close() })
+    var snap = root.focusSnapshot
+    if (!snap || !snap.id) {
+      flashCopied("Type unavailable")
+      return
+    }
+    vault.type(record.account, snap, function(ok, err) {
+      if (!ok)
+        flashCopied(err || "Type aborted")
+    })
+    root.close()
   }
 
   function accountExists(account) {
@@ -273,7 +308,7 @@ Panel {
       })
     } else if (confirmAction === "replaceNostr") {
       closeConfirm()
-      doGenerateNostr()
+      doGenerateNostr(true)
     } else {
       closeConfirm()
     }
@@ -292,7 +327,7 @@ Panel {
     })
   }
 
-  function doGenerateNostr() {
+  function doGenerateNostr(replace) {
     var nick = String(addAccount || "").trim()
     var fold = String(addFolder || "").trim() || "Nostr"
     vault.generateNostr(nick, fold, function(ok, msg) {
@@ -310,7 +345,7 @@ Panel {
       } else {
         addError = msg || "Failed to generate Nostr key"
       }
-    })
+    }, replace === true)
   }
 
   function generateNostrKey() {
@@ -327,7 +362,7 @@ Panel {
       confirmOpen = true
       return
     }
-    doGenerateNostr()
+    doGenerateNostr(false)
   }
 
   function removeRecord(record) {

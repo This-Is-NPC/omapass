@@ -1,0 +1,733 @@
+#!/usr/bin/python3
+"""omapass keyring helper — pinned binaries, libsecret backend, no PATH lookups."""
+
+import argparse
+import json
+import os
+import secrets
+import subprocess
+import sys
+import time
+
+os.environ["PATH"] = "/usr/bin:/bin"
+
+SERVICE = "omapass"
+NOSTR_ACCOUNT = "nostr:default"
+NOSTR_FOLDER = "Nostr"
+
+WL_COPY = "/usr/bin/wl-copy"
+WTYPE = "/usr/bin/wtype"
+HYPRCTL = "/usr/bin/hyprctl"
+NIRI = "/usr/bin/niri"
+TYPE_TIMEOUT_MS = 500
+WL_PASTE = "/usr/bin/wl-paste"
+CLIPBOARD_TTL_S = 30
+
+TYPE_POLL_MS = 50
+
+BACKEND = None
+
+_CHILD_ENV_KEYS = (
+    "HOME",
+    "DBUS_SESSION_BUS_ADDRESS",
+    "XDG_RUNTIME_DIR",
+    "WAYLAND_DISPLAY",
+    "HYPRLAND_INSTANCE_SIGNATURE",
+    "NIRI_SOCKET",
+    "LANG",
+    "LC_ALL",
+    "XDG_SESSION_TYPE",
+)
+
+CHARSET = "qpzry9x8gf2tvdw0s3jn54khce6mua7l"
+GEN = [0x3B6A57B2, 0x26508E6D, 0x1EA119FA, 0x3D4233DD, 0x2A1462B3]
+
+
+def child_env():
+    env = {"PATH": "/usr/bin:/bin"}
+    for key in _CHILD_ENV_KEYS:
+        val = os.environ.get(key)
+        if val is not None:
+            env[key] = val
+    return env
+
+
+def die(msg, code=1):
+    print(msg, file=sys.stderr)
+    raise SystemExit(code)
+
+
+def exec_abs(path, args, input=None, capture=False):
+    if not path or not os.path.isabs(path):
+        die(f"refusing non-absolute executable path: {path!r}")
+    cmd = [path] + list(args)
+    kwargs = {
+        "env": child_env(),
+        "check": False,
+    }
+    if input is not None:
+        kwargs["input"] = input
+        kwargs["text"] = True
+    if capture:
+        kwargs["capture_output"] = True
+        kwargs["text"] = True
+    return subprocess.run(cmd, **kwargs)
+
+
+def polymod(values):
+    chk = 1
+    for v in values:
+        b = chk >> 25
+        chk = ((chk & 0x1FFFFFF) << 5) ^ v
+        for i in range(5):
+            if (b >> i) & 1:
+                chk ^= GEN[i]
+    return chk
+
+
+def hrp_expand(hrp):
+    return [ord(x) >> 5 for x in hrp] + [0] + [ord(x) & 31 for x in hrp]
+
+
+def create_checksum(hrp, data):
+    values = hrp_expand(hrp) + data
+    mod = polymod(values + [0] * 6) ^ 1
+    return [(mod >> 5 * (5 - i)) & 31 for i in range(6)]
+
+
+def bech32_encode(hrp, data):
+    combined = data + create_checksum(hrp, data)
+    return hrp + "1" + "".join(CHARSET[d] for d in combined)
+
+
+def bech32_decode(bech):
+    if any(ord(x) < 33 or ord(x) > 126 for x in bech):
+        return None, None
+    bech = bech.lower()
+    pos = bech.rfind("1")
+    if pos < 1 or pos + 7 > len(bech):
+        return None, None
+    hrp = bech[:pos]
+    data = []
+    for c in bech[pos + 1 :]:
+        idx = CHARSET.find(c)
+        if idx == -1:
+            return None, None
+        data.append(idx)
+    if polymod(hrp_expand(hrp) + data) != 1:
+        return None, None
+    return hrp, data[:-6]
+
+
+def convertbits(data, frombits, tobits, pad=True):
+    acc = bits = 0
+    ret = []
+    maxv = (1 << tobits) - 1
+    for value in data:
+        acc = (acc << frombits) | value
+        bits += frombits
+        while bits >= tobits:
+            bits -= tobits
+            ret.append((acc >> bits) & maxv)
+    if pad:
+        if bits:
+            ret.append((acc << (tobits - bits)) & maxv)
+    elif bits >= frombits or ((acc << (tobits - bits)) & maxv):
+        return None
+    return ret
+
+
+def nsec_encode(raw32):
+    data = convertbits(raw32, 8, 5, True)
+    if data is None:
+        die("failed to encode nsec")
+    return bech32_encode("nsec", data)
+
+
+def parse_nostr_secret(stored):
+    stored = stored.strip()
+    if stored.startswith("nsec1"):
+        hrp, data = bech32_decode(stored)
+        if hrp != "nsec" or data is None:
+            die("stored nostr key is not valid nsec1")
+        raw = convertbits(data, 5, 8, False)
+        if raw is None or len(raw) != 32:
+            die("stored nostr key is not valid nsec1")
+        return bytes(raw)
+    if len(stored) == 64 and all(c in "0123456789abcdefABCDEF" for c in stored):
+        return bytes.fromhex(stored)
+    die("stored nostr key format not recognized (expected nsec1 or 64-char hex)")
+
+
+def has_nostr_crypto():
+    for name in ("coincurve", "nak", "secp256k1"):
+        try:
+            __import__(name)
+            return name
+        except ImportError:
+            pass
+    return None
+
+
+def npub_from_sk(raw32):
+    backend = has_nostr_crypto()
+    if not backend:
+        return None
+    if backend == "coincurve":
+        from coincurve import PrivateKey
+
+        xonly = PrivateKey(raw32).public_key.format(compressed=True)[1:]
+    elif backend == "nak":
+        import nak
+
+        xonly = bytes(nak.PrivateKey(bytes(raw32)).public_key)[1:]
+    else:
+        import secp256k1
+
+        xonly = secp256k1.PrivateKey(raw32, raw=True).pubkey.serialize(compressed=True)[1:]
+    data = convertbits(xonly, 8, 5, True)
+    return bech32_encode("npub", data)
+
+
+def generate_nsec_material():
+    sk = os.urandom(32)
+    nsec = nsec_encode(sk)
+    npub = npub_from_sk(sk)
+    return nsec, npub
+
+
+class GiKeyring:
+    def __init__(self):
+        try:
+            import gi
+
+            gi.require_version("Secret", "1")
+            from gi.repository import Secret
+        except (ImportError, ValueError) as exc:
+            print(
+                "omapass-keyring requires PyGObject (python-gobject) and libsecret",
+                file=sys.stderr,
+            )
+            print(str(exc), file=sys.stderr)
+            raise SystemExit(1) from exc
+        self._Secret = Secret
+
+    def _attrs(self, account, kind=None):
+        attrs = {"service": SERVICE, "account": account}
+        if kind:
+            attrs["kind"] = kind
+        return attrs
+
+    def list_items(self):
+        Secret = self._Secret
+        flags = Secret.SearchFlags.ALL
+        flags &= ~Secret.SearchFlags.LOAD_SECRETS
+        flags &= ~Secret.SearchFlags.UNLOCK
+        service = Secret.Service.get_sync(Secret.ServiceFlags.OPEN_SESSION, None)
+        results = service.search_sync(None, {"service": SERVICE}, flags, None)
+        items = []
+        for item in results:
+            attrs = item.get_attributes() or {}
+            account = attrs.get("account", "")
+            if not account:
+                continue
+            items.append(
+                {
+                    "account": account,
+                    "folder": item.get_label() or "",
+                    "kind": attrs.get("kind", ""),
+                }
+            )
+        items.sort(key=lambda row: row["account"])
+        return items
+
+    def get_secret(self, account):
+        Secret = self._Secret
+        secret = Secret.password_lookup_sync(None, self._attrs(account), None)
+        if secret is None:
+            die(f"no secret for account: {account}")
+        return secret
+
+    def store(self, account, folder, secret, kind=""):
+        Secret = self._Secret
+        attrs = self._attrs(account, kind if kind else None)
+        ok = Secret.password_store_sync(
+            None,
+            attrs,
+            Secret.COLLECTION_DEFAULT,
+            folder,
+            secret,
+            None,
+        )
+        if not ok:
+            die(f"failed to store secret for account: {account}")
+
+    def clear(self, account):
+        Secret = self._Secret
+        ok = Secret.password_clear_sync(None, self._attrs(account), None)
+        if not ok:
+            die(f"failed to clear account: {account}")
+
+    def exists(self, account):
+        Secret = self._Secret
+        flags = Secret.SearchFlags.ALL
+        flags &= ~Secret.SearchFlags.LOAD_SECRETS
+        flags &= ~Secret.SearchFlags.UNLOCK
+        service = Secret.Service.get_sync(Secret.ServiceFlags.OPEN_SESSION, None)
+        results = service.search_sync(None, self._attrs(account), flags, None)
+        return bool(results)
+
+
+def get_backend():
+    global BACKEND
+    if BACKEND is not None:
+        return BACKEND
+    return GiKeyring()
+
+
+def take_account(argv, flag_name="--account"):
+    if not argv:
+        die("expected account argument")
+    if argv[0] == "--":
+        argv = argv[1:]
+    if len(argv) != 1 or not argv[0]:
+        die("expected exactly one account argument")
+    return argv[0]
+
+
+def take_optional_account(argv, default):
+    if argv and argv[0] == "--":
+        argv = argv[1:]
+    if not argv:
+        return default
+    if len(argv) != 1 or not argv[0]:
+        die("expected at most one account argument")
+    return argv[0]
+
+
+def read_secret_value():
+    if sys.stdin.isatty():
+        import getpass
+
+        secret = getpass.getpass("Password: ")
+        confirm = getpass.getpass("Confirm: ")
+        if secret != confirm:
+            die("passwords do not match")
+        return secret
+    return sys.stdin.read()
+
+
+def cmd_list(args):
+    items = get_backend().list_items()
+    if args.json:
+        print(json.dumps(items, ensure_ascii=False))
+        return
+    for row in items:
+        print(f"{row['account']}\t{row['folder']}")
+
+
+def cmd_get(args):
+    if sys.stdout.isatty() and not args.yes:
+        die("refusing to print a secret to a terminal; pipe the output or pass --yes")
+    account = args.account or take_account(args.rest)
+    print(get_backend().get_secret(account), end="")
+
+
+def cmd_store(args):
+    account = args.account
+    folder = args.folder or args.label
+    if not account:
+        die("store requires --account")
+    if not folder:
+        die("store requires --folder or --label")
+    secret = sys.stdin.read()
+    get_backend().store(account, folder, secret, args.kind or "")
+    return
+
+
+def cmd_add(args):
+    account = args.account
+    folder = args.folder or args.label
+    if not account:
+        die("add requires --account")
+    if not folder:
+        die("add requires --folder or --label")
+    secret = read_secret_value()
+    get_backend().store(account, folder, secret, args.kind or "")
+    return
+
+
+def cmd_clear(args):
+    account = args.account or take_account(args.rest)
+    get_backend().clear(account)
+
+
+def cmd_exists(args):
+    account = args.account
+    if not account:
+        die("exists requires --account")
+    raise SystemExit(0 if get_backend().exists(account) else 1)
+
+
+def cmd_copy(args):
+    account = args.account or take_account(args.rest)
+    secret = get_backend().get_secret(account)
+    result = exec_abs(WL_COPY, ["--paste-once"], input=secret)
+    if result.returncode != 0:
+        die("wl-copy failed", result.returncode or 1)
+    spawn_clipboard_expire(secret)
+
+
+def cmd_clipboard_expire(args):
+    secret = sys.stdin.read()
+    delay = args.delay
+    if delay > 0:
+        time.sleep(delay)
+    paste = exec_abs(WL_PASTE, ["--no-newline"], capture=True)
+    if paste.returncode == 0 and paste.stdout == secret:
+        exec_abs(WL_COPY, ["--clear"])
+
+def spawn_clipboard_expire(secret):
+    helper = os.path.abspath(__file__)
+    if not helper or not os.path.isabs(helper):
+        die(f"refusing non-absolute helper path: {helper!r}")
+    proc = subprocess.Popen(
+        [
+            "/usr/bin/python3",
+            helper,
+            "clipboard-expire",
+            "--delay",
+            str(int(CLIPBOARD_TTL_S)),
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env=child_env(),
+        start_new_session=True,
+        text=True,
+    )
+    try:
+        proc.stdin.write(secret)
+        proc.stdin.close()
+    except BrokenPipeError:
+        pass
+
+
+
+def cmd_copy_text(_args):
+    text = sys.stdin.read()
+    result = exec_abs(WL_COPY, [], input=text)
+    if result.returncode != 0:
+        die("wl-copy failed", result.returncode or 1)
+
+
+def read_hyprland_focus():
+    result = exec_abs(HYPRCTL, ["activewindow", "-j"], capture=True)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    address = data.get("address")
+    if not address:
+        return None
+    return {"compositor": "hyprland", "id": str(address)}
+
+
+def read_niri_focus():
+    result = exec_abs(NIRI, ["msg", "--json", "focused-window"], capture=True)
+    if result.returncode != 0 or not result.stdout.strip():
+        return None
+    try:
+        data = json.loads(result.stdout)
+    except json.JSONDecodeError:
+        return None
+    wid = data.get("id")
+    if wid is None:
+        return None
+    return {"compositor": "niri", "id": str(wid)}
+
+
+def focus_snapshot():
+    if os.environ.get("HYPRLAND_INSTANCE_SIGNATURE"):
+        snap = read_hyprland_focus()
+        if snap:
+            return snap
+    else:
+        snap = read_hyprland_focus()
+        if snap:
+            return snap
+    snap = read_niri_focus()
+    if snap:
+        return snap
+    return None
+
+
+def read_focus_for(compositor):
+    if compositor == "hyprland":
+        return read_hyprland_focus()
+    if compositor == "niri":
+        return read_niri_focus()
+    return None
+
+
+def focus_matches(snapshot):
+    if not snapshot:
+        return False
+    current = read_focus_for(snapshot["compositor"])
+    return bool(current and current.get("id") == snapshot.get("id"))
+
+
+def wait_for_focus(snapshot):
+    deadline = time.monotonic() + (TYPE_TIMEOUT_MS / 1000.0)
+    while time.monotonic() < deadline:
+        if focus_matches(snapshot):
+            return True
+        time.sleep(TYPE_POLL_MS / 1000.0)
+    return focus_matches(snapshot)
+
+
+def cmd_focus_snapshot(_args):
+    snap = focus_snapshot()
+    if not snap:
+        die("no compositor focus available", 3)
+    print(json.dumps(snap))
+
+
+def cmd_type(args):
+    account = args.account or take_account(args.rest)
+    if not account:
+        die("type requires --account or positional account")
+    compositor = args.compositor
+    expect_id = args.expect_id
+    if expect_id is None or compositor is None:
+        snap = focus_snapshot()
+        if not snap:
+            die("no compositor focus available", 3)
+        compositor = snap["compositor"]
+        expect_id = snap["id"]
+    target = {"compositor": compositor, "id": str(expect_id)}
+    if not wait_for_focus(target):
+        die("focus changed", 2)
+    secret = get_backend().get_secret(account)
+    current = read_focus_for(target["compositor"])
+    if current is None:
+        die("focus unavailable", 2)
+    if current.get("id") != target.get("id"):
+        die("focus changed", 2)
+    result = exec_abs(WTYPE, ["-"], input=secret)
+    if result.returncode != 0:
+        die("wtype failed", result.returncode or 1)
+
+
+def cmd_generate_password(_args):
+    print(secrets.token_urlsafe(18))
+
+
+def cmd_generate_nostr(args):
+    account = args.account or NOSTR_ACCOUNT
+    folder = args.folder or NOSTR_FOLDER
+    backend = get_backend()
+    if backend.exists(account) and not args.replace:
+        die(f"nostr key already exists ({account})")
+    nsec, npub = generate_nsec_material()
+    backend.store(account, folder, nsec, "nostr")
+    payload = {"ok": True, "account": account}
+    if npub:
+        payload["npub"] = npub
+    print(json.dumps(payload, ensure_ascii=False))
+
+
+def cmd_nostr_new(args):
+    account = args.account or NOSTR_ACCOUNT
+    folder = args.folder or NOSTR_FOLDER
+    backend = get_backend()
+    if backend.exists(account):
+        die(f"nostr key already exists ({account})")
+    nsec, npub = generate_nsec_material()
+    backend.store(account, folder, nsec, "nostr")
+    if npub:
+        print(npub)
+    elif has_nostr_crypto() is None:
+        print(
+            "NOTE: install coincurve, nak, or secp256k1 to derive npub (omapass nostr show-npub)"
+        )
+
+
+def cmd_nostr_show_npub(args):
+    account = take_optional_account(args.rest, NOSTR_ACCOUNT)
+    stored = get_backend().get_secret(account)
+    sk = parse_nostr_secret(stored)
+    npub = npub_from_sk(sk)
+    if not npub:
+        die("npub requires coincurve, nak, or secp256k1")
+    print(npub)
+
+
+def cmd_nostr_show_nsec(args):
+    if not sys.stdin.isatty():
+        die("nostr show-nsec requires an interactive terminal")
+    account = take_optional_account(args.rest, NOSTR_ACCOUNT)
+    print("Type yes to reveal the Nostr secret key: ", end="", file=sys.stderr)
+    answer = input().strip()
+    if answer != "yes":
+        die("confirmation failed")
+    print(get_backend().get_secret(account))
+
+
+def cmd_nostr_rm(args):
+    account = take_optional_account(args.rest, NOSTR_ACCOUNT)
+    get_backend().clear(account)
+
+
+def build_parser():
+    parser = argparse.ArgumentParser(prog="omapass-keyring", add_help=False)
+    parser.add_argument("-h", "--help", action="store_true")
+    sub = parser.add_subparsers(dest="command")
+
+    p_list = sub.add_parser("list")
+    p_list.add_argument("--json", action="store_true")
+
+    p_get = sub.add_parser("get")
+    p_get.add_argument("--yes", action="store_true")
+    p_get.add_argument("--account")
+    p_get.add_argument("rest", nargs=argparse.REMAINDER)
+
+    p_store = sub.add_parser("store")
+    p_store.add_argument("--account")
+    p_store.add_argument("--folder")
+    p_store.add_argument("--label")
+    p_store.add_argument("--kind", default="")
+
+    p_add = sub.add_parser("add")
+    p_add.add_argument("--account")
+    p_add.add_argument("--folder")
+    p_add.add_argument("--label")
+    p_add.add_argument("--kind", default="")
+
+    p_clear = sub.add_parser("clear")
+    p_clear.add_argument("--account")
+    p_clear.add_argument("rest", nargs=argparse.REMAINDER)
+
+    p_rm = sub.add_parser("rm")
+    p_rm.add_argument("rest", nargs=argparse.REMAINDER)
+
+    p_exists = sub.add_parser("exists")
+    p_exists.add_argument("--account", required=True)
+
+    p_copy = sub.add_parser("copy")
+    p_copy.add_argument("--account")
+    p_copy.add_argument("rest", nargs=argparse.REMAINDER)
+
+    sub.add_parser("copy-text")
+
+    p_clipboard_expire = sub.add_parser("clipboard-expire")
+    p_clipboard_expire.add_argument(
+        "--delay", type=int, default=CLIPBOARD_TTL_S
+    )
+    sub.add_parser("focus-snapshot")
+
+    p_type = sub.add_parser("type")
+    p_type.add_argument("--account")
+    p_type.add_argument("--compositor")
+    p_type.add_argument("--expect-id")
+    p_type.add_argument("rest", nargs=argparse.REMAINDER)
+
+    sub.add_parser("generate-password")
+
+    p_gen_nostr = sub.add_parser("generate-nostr")
+    p_gen_nostr.add_argument("--account")
+    p_gen_nostr.add_argument("--folder")
+    p_gen_nostr.add_argument("--replace", action="store_true")
+
+    p_nostr = sub.add_parser("nostr")
+    nostr_sub = p_nostr.add_subparsers(dest="nostr_cmd")
+
+    p_nostr_new = nostr_sub.add_parser("new")
+    p_nostr_new.add_argument("--account")
+    p_nostr_new.add_argument("--folder")
+
+    p_nostr_npub = nostr_sub.add_parser("show-npub")
+    p_nostr_npub.add_argument("rest", nargs=argparse.REMAINDER)
+
+    p_nostr_nsec = nostr_sub.add_parser("show-nsec")
+    p_nostr_nsec.add_argument("rest", nargs=argparse.REMAINDER)
+
+    p_nostr_rm = nostr_sub.add_parser("rm")
+    p_nostr_rm.add_argument("rest", nargs=argparse.REMAINDER)
+
+    return parser
+
+
+def usage():
+    print(
+        """Usage: omapass-keyring <command> [options]
+
+Commands:
+  list [--json]                 List saved logins (account + folder)
+  get [--account <id>] [--yes] | get [--] <account>   (--yes required on TTY)
+  store --account <id> --folder <name>   Secret on stdin
+  add --account <id> --folder <name>     Prompt or stdin
+  clear --account <id> | rm [--] <account>
+  exists --account <id>         Exit 0/1
+  copy [--account <id>] | copy [--] <account>   (--paste-once + auto-expire)
+  copy-text                     Copy stdin to clipboard
+  clipboard-expire [--delay <seconds>]   Internal: clear clipboard after TTL
+  focus-snapshot                JSON focused window id
+  type --account <id> [--compositor C --expect-id ID]
+  generate-password             One-line random password
+  generate-nostr --account <id> --folder <name> [--replace]
+  nostr new|show-npub|show-nsec|rm
+"""
+    )
+
+
+def main(argv=None):
+    argv = list(argv or sys.argv[1:])
+    if not argv or argv[0] in ("-h", "--help"):
+        usage()
+        raise SystemExit(0 if argv and argv[0] in ("-h", "--help") else 1)
+
+    parser = build_parser()
+    args = parser.parse_args(argv)
+
+    handlers = {
+        "list": cmd_list,
+        "get": cmd_get,
+        "store": cmd_store,
+        "add": cmd_add,
+        "clear": cmd_clear,
+        "rm": lambda a: cmd_clear(type("X", (), {"account": None, "rest": a.rest})()),
+        "exists": cmd_exists,
+        "copy": cmd_copy,
+        "clipboard-expire": cmd_clipboard_expire,
+        "copy-text": cmd_copy_text,
+        "focus-snapshot": cmd_focus_snapshot,
+        "type": cmd_type,
+        "generate-password": cmd_generate_password,
+        "generate-nostr": cmd_generate_nostr,
+    }
+
+    if args.command == "nostr":
+        nostr_handlers = {
+            "new": cmd_nostr_new,
+            "show-npub": cmd_nostr_show_npub,
+            "show-nsec": cmd_nostr_show_nsec,
+            "rm": cmd_nostr_rm,
+        }
+        handler = nostr_handlers.get(args.nostr_cmd)
+        if not handler:
+            usage()
+            raise SystemExit(1)
+        handler(args)
+        return
+
+    handler = handlers.get(args.command)
+    if not handler:
+        die(f"unknown command: {args.command}")
+    handler(args)
+
+
+if __name__ == "__main__":
+    main()
