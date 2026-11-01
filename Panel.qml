@@ -2,6 +2,7 @@ import QtQuick
 import QtQuick.Controls
 import QtQuick.Layouts
 import Quickshell
+import Quickshell.Io
 import qs.Commons
 import qs.Ui
 import "Model.js" as Model
@@ -39,6 +40,9 @@ Panel {
   property var pendingRemoveRecord: null
   property var focusSnapshot: null
   property bool popoutSwitchClosing: false
+  // Where the panel opens: centered on the bar (default) or under the icon.
+  // Stored in shell.json as this widget's "centerPanel" setting.
+  readonly property bool centerPanel: setting("centerPanel", true) === true
 
   function wipeSensitiveState() {
     vault.forgetSecrets()
@@ -205,6 +209,11 @@ Panel {
   function flashSaved() {
     savedFlash = true
     savedTimer.restart()
+  }
+
+  function togglePanelPosition() {
+    settingProc.command = ["omarchy-bar", "set", moduleName, "centerPanel", centerPanel ? "false" : "true", "--json"]
+    settingProc.running = true
   }
 
   function openAddView() {
@@ -444,6 +453,12 @@ Panel {
     id: vault
   }
 
+  Process {
+    id: settingProc
+    running: false
+    command: []
+  }
+
   Timer {
     id: copiedTimer
     interval: 1200
@@ -485,7 +500,7 @@ Panel {
     owner: root.barIdentity
     bar: root.bar
     open: root.opened
-    centerOnBar: true
+    centerOnBar: root.centerPanel
     focusTarget: keyCatcher
     contentWidth: panel.fittedContentWidth(Style.space(380))
     contentHeight: panel.fittedContentHeight(Style.space(480), Style.space(800))
@@ -705,6 +720,14 @@ Panel {
             foreground: root.foreground
             fontFamily: contentFontFamily
             onClicked: root.openAddView()
+          }
+
+          PanelActionButton {
+            iconText: root.centerPanel ? "󰉣" : "󰉠"
+            tooltipText: root.centerPanel ? "Move to the right" : "Move to the center"
+            foreground: root.foreground
+            fontFamily: contentFontFamily
+            onClicked: root.togglePanelPosition()
           }
         }
 

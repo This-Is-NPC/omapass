@@ -33,6 +33,14 @@ Or run them manually: `./tests/run.sh`
 - **Add form:** **Left/Right** switches Account | Nostr; **Ctrl+G** generates password or Nostr key; **Ctrl+E** show/hide password; **Enter** saves (Account) or generates key (Nostr); **Escape** cancels
 - **Row menu:** `m` or **Right** opens overflow; **Delete** or `x` removes (with confirmation); in confirm dialog: **Enter**, **Escape**, **Tab**
 
+## Panel position
+
+The panel opens centered on the bar by default. The button next to Add switches it: 󰉣 moves the panel under the icon, 󰉠 centers it again. The choice is saved as the `centerPanel` setting in `~/.config/omarchy/shell.json`, so it can also be set from the CLI:
+
+```sh
+omarchy bar set io.github.this-is-npc.omapass centerPanel false --json
+```
+
 CLI:
 
 ```
