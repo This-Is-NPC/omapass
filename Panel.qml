@@ -212,6 +212,8 @@ Panel {
   }
 
   function togglePanelPosition() {
+    if (settingProc.running)
+      return
     settingProc.command = ["omarchy-bar", "set", moduleName, "centerPanel", centerPanel ? "false" : "true", "--json"]
     settingProc.running = true
   }
@@ -457,6 +459,14 @@ Panel {
     id: settingProc
     running: false
     command: []
+    stderr: StdioCollector {
+      id: settingStderr
+      waitForEnd: true
+    }
+    onExited: function(exitCode) {
+      if (exitCode !== 0)
+        console.warn("omapass: could not save centerPanel:", String(settingStderr.text || "").trim() || "exit " + exitCode)
+    }
   }
 
   Timer {
@@ -477,6 +487,12 @@ Panel {
     sequences: ["Ctrl+N"]
     enabled: root.opened && !folderField.activeFocus && !accountField.activeFocus && !passwordField.activeFocus
     onActivated: root.openAddView()
+  }
+
+  Shortcut {
+    sequences: ["Ctrl+P"]
+    enabled: root.opened && root.view === "list"
+    onActivated: root.togglePanelPosition()
   }
 
   Shortcut {
@@ -724,7 +740,7 @@ Panel {
 
           PanelActionButton {
             iconText: root.centerPanel ? "󰉣" : "󰉠"
-            tooltipText: root.centerPanel ? "Move to the right" : "Move to the center"
+            tooltipText: root.centerPanel ? "Open under the icon (Ctrl+P)" : "Open centered on the bar (Ctrl+P)"
             foreground: root.foreground
             fontFamily: contentFontFamily
             onClicked: root.togglePanelPosition()
