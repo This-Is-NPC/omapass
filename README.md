@@ -1,6 +1,6 @@
 # omapass
 
-omapass is 100% local. It lists, stores, copies, and types logins from the native gnome-keyring. Optional nsec stays in the same keyring. Not a 1Password/Bitwarden client and not Nostr sync.
+100% local logins for the Omarchy shell: omapass lists, stores, copies and types them from the native gnome-keyring, and keeps an optional Nostr `nsec` in the same keyring. It is not a 1Password or Bitwarden client and it does not sync over Nostr.
 
 ## Install
 
@@ -8,216 +8,74 @@ omapass is 100% local. It lists, stores, copies, and types logins from the nativ
 omarchy plugin add https://github.com/This-Is-NPC/omapass.git --enable
 ```
 
-After updating the plugin files by hand, the shell notices the change by itself: it watches `~/.config/omarchy/plugins` (ignoring hidden entries, `.git` and `__pycache__`), clears its QML cache and rebuilds the plugin's widget, so the next panel runs the new QML and the new helper (read in the installed Omarchy shell source, `/usr/share/omarchy/shell/services/PluginRegistry.qml` and `shell.qml`, not in the vendored copy under `tests/qml/shell/`; not tried on a live shell). The rebuild destroys the panel on screen without closing it: an unsaved form is lost and a helper that is still running is killed (see Limitations). Run `omarchy-restart-shell` if the panel does not change.
+This clones the plugin into `~/.config/omarchy/plugins/` and enables it; the shell picks it up by itself. [How to install and remove](docs/how-to-install-and-remove.md) covers updates by hand and removal.
 
-## Dependencies
+## Start here
 
-omapass uses the gnome-keyring, clipboard, and typing tools that already ship with Omarchy. The Python helper needs **PyGObject** (`python-gobject`) for `gi.repository.Secret`. `bin/omapass-keyring` is only the CLI entrypoint; the code is in the package `bin/omapass_lib/`: `common.py` (constants, exit codes, `die`, `exec_abs`, invisible-character checks), `keyring_store.py` (the libsecret backend, `enc=b64`, the write lock), `keyfile_guard.py` (`rewrite_risks` and `doctor`), `secret_io.py` (input validation, `--item-stdin`, process hardening, clipboard, autotype) and `nostr.py`. The entrypoint adds its own directory to `sys.path` itself, because `python3 -I` implies `-P` on Python 3.11 and later and then leaves the script directory off the path. omapass runs no daemon of its own. Copying starts a detached helper process that owns `wl-copy` and drops the copied password when another copy replaces it or after 30 seconds (see Clipboard below).
+- Click the bar widget — open the panel
+- `/` — search
+- `Enter` — copy the password
+- `Shift+Enter` — type it into the focused window (never copies)
+- `+` — add a login
+- `m` — row menu (copy account, type, remove)
+- `Ctrl+P` — panel under the icon or centered on the bar
+- `Esc` — clear the search, close a menu, then close the panel
 
-**No sudo or pkexec is required.**
+## Big ideas
 
-### Git hooks
+**[Keyboard](docs/keyboard.md)** — every key in the list, the search, the add form and the row menu.
 
-Unit and QML tests run on `git push` when hooks are enabled:
+**[Screens](docs/screens.md)** — what the panel looks like, folder cards and chips, the status strip, and where the panel sits.
 
-```sh
-git config core.hooksPath hooks
-```
+**[Autotype](docs/autotype.md)** — how typing into a window checks focus, layers and the lock screen before each character, and what risk is left.
 
-Or run them manually: `./tests/run.sh` and `scripts/test-qml`
+**[Type into a window](docs/how-to-type-into-a-window.md)** — the steps to type a login into another application.
 
-Tests never touch your keyring. `./tests/run.sh` runs them in a Docker
-container (`scripts/test-sandbox`) with its own D-Bus session and a throwaway,
-empty-password `Default_keyring`, the same layout Omarchy uses. After the run
-the sandbox stops gnome-keyring, waits until the old daemon has exited (exit
-code 92 if it does not), restarts it and checks that the keyring still loads;
-if it does not, the run fails with exit code 91. Docker is required.
+**[Clipboard](docs/clipboard.md)** — a copy lives for at most 30 seconds, and a detached helper drops it.
 
-The tests trust only a marker file baked into the image
-(`/opt/sandbox/IN_SANDBOX`, root-owned) together with `OMAPASS_SANDBOX=1`;
-exporting the variable on the host does not skip the sandbox. The check lives in
-`tests/sandbox_env.py`.
+**[Storage](docs/storage.md)** — how logins sit in the keyring (`enc=b64`), the write lock, the write guard and `doctor`.
 
-Run any command in the sandbox, for example an interactive shell:
+**[Check the keyring](docs/how-to-check-the-keyring.md)** — what to do first after a write error.
 
-```sh
-scripts/test-sandbox bash
-```
+**[Names](docs/names.md)** — input limits, Unicode normalization, invisible characters, identity, duplicates and `--replace`.
 
-The sandbox image is reproducible. `tests/sandbox/Containerfile` pins the
-`archlinux` base by digest and points pacman at a dated Arch Linux Archive
-snapshot (`SNAPSHOT`, currently 2026/11/09, the base image's creation date).
-To bump, run `docker pull archlinux:latest`, copy the digest from
-`docker inspect --format '{{index .RepoDigests 0}}' archlinux:latest` into
-`BASE`, set `SNAPSHOT` to the image's creation date, and run `./tests/run.sh`.
-The image also has `wtype` (so the test that `wtype` ignores `TMPDIR` runs) and `coincurve` 19.0.1, built from the PyPI source pinned by sha256 in a first build stage because Arch has no package for it (the tests check `nostr show-npub` against the BIP-340 public keys of secret keys 1 and 3). The `secp256k1` backend is not exercised.
-The image tag is a hash of `tests/sandbox/`, so the edit triggers a rebuild.
+**[Security](docs/security.md)** — secrets on stdin, core dumps, process hardening and CLI secrets.
 
-### QML runtime tests
+**[CLI](docs/cli.md)** — the `omapass` command: commands, options and exit codes.
 
-The panel (`qml/Panel.qml` and the QML components it delegates to) is also tested running: `scripts/test-qml` stages `qml/` and the stub helper and starts the real panel
-in quickshell under a headless sway, sends keys with `wtype`, and checks the
-panel state and the helper commands it ran. It covers Enter and Shift+Enter,
-Space and single letters, the confirm dialog, the row menu, the masked
-generated password, the lit row on the folder chips, and a late save reply
-after the form was closed. A virtual pointer (`tests/qml/vptr.py`) checks that
-a pointer at rest never changes the selected row, the confirm button, the row
-menu's option, the chips or the search field, and only real motion does. Those
-tests wait until the panel reports the hover on the item under the pointer
-before they assert that nothing happened. Other tests check that padded and dash-leading account
-names reach the helper unchanged, that "Copied account" reports the helper's
-result, that closing or cancelling wipes the form, and that no secret appears
-in the helper's arguments. `tests/qml/test_data_runtime.py` covers failed saves, queued refreshes, helper timeouts, a Vault destroyed with a helper running, duplicate rows and the Replace question. Run all the tests with `scripts/test-qml`; the count
-and time are printed at the end.
+## Interface
 
-Like `scripts/test-sandbox`, it runs in a disposable Docker container with
-`--network none` and a read-only repo mount. Unlike `scripts/test-qml`,
-`scripts/test-sandbox` keeps Docker's default root filesystem and capabilities;
-only `/tmp` is a tmpfs.
-It has no keyring and no D-Bus: the panel calls `tests/qml/stub-helper`, which
-only logs its arguments, never `bin/omapass-keyring`. The tests wait for
-panel state or a logged helper call, with a 15 second timeout; they contain no
-fixed sleeps. Where a test asserts that nothing happens, it polls the state
-for a bounded window and fails at the first poll that differs. Docker is
-required.
+The panel is keyboard first; a click works wherever a key does. Keys are in [docs/keyboard.md](docs/keyboard.md). The same keyring is reachable from the `omapass` command, documented in [docs/cli.md](docs/cli.md).
 
-Hangs are bounded at three levels. A watchdog in each test kills quickshell
-and fails the test after 90 seconds (`OMAPASS_QML_WATCHDOG`). The container
-stops the whole run after 1500 seconds (`OMAPASS_RUN_TIMEOUT`, `0` for no
-limit; a shell opened with `scripts/test-qml bash` is bound too). Both runners
-start the container through `scripts/run-container`: `--rm --init`, a unique
-name, and a trap that removes the container when the script exits or is
-interrupted with Ctrl-C or SIGTERM. `scripts/test-sandbox` has the same
-run bound. A `kill -9` of the script cannot run the trap; the run bound then
-ends the container.
+## What it does not do
 
-- The image (`tests/qml-sandbox/Containerfile`) is pinned like the keyring
-  sandbox (base digest and Arch Archive snapshot) and tagged by a hash of
-  `tests/qml-sandbox/`.
-- Omarchy's `Commons` and `Ui` are vendored in `tests/qml/shell/`; see
-  `SOURCE.md` there for the version and how to bump it. A pinned copy was
-  chosen over mounting `/usr/share/omarchy/shell`, so results do not depend on
-  the Omarchy version installed on the machine.
-- The sandbox's stock quickshell resolves `Color` to Qt 6.12's own `Color`
-  type, unlike Omarchy's patched build. The tests import QtQuick at 6.11 in
-  their staged copy of the QML to avoid that.
-- `scripts/test-qml --panel FILE` replaces only `qml/Panel.qml` in the staged copy (the components stay as they are) and runs the tests against it,
-  for example a copy with one behavior broken to check a test can fail.
-- Limits: sway stands in for Hyprland, so `hyprctl` is absent (the panel logs
-  warnings and keeps its default border), and `wtype` types into the panel
-  only. It does not cover the clipboard or typing into another window.
+- It runs no daemon. A copy starts a detached helper that exits after the clipboard clears.
+- It does not sync, and it does not talk to any server.
+- It needs no `sudo` or `pkexec`.
+- It never creates a missing keyring; it stops with an error instead.
+- Secrets never appear in the list UI or in a command's argv. `copy`, `type` and `clear` also keep item names off argv (they read them on stdin); `store` and `generate-nostr` still pass the account and folder as arguments. See [Security](docs/security.md#item-on-stdin).
+- Only an explicit action copies or types a secret: no single letter or Space does.
 
-It is not part of `./tests/run.sh`, because it needs its own image.
-`hooks/pre-push` runs both.
+## Known limitations
 
+**Clipboard.** A copied password stays until another copy replaces it or 30 seconds pass. See [Clipboard](docs/clipboard.md).
 
-## Keyboard
+**Autotype focus gap.** Focus can change between the check and a keystroke, so one character can reach another window. Do not switch windows while it types. See [Autotype](docs/autotype.md).
 
-- **Open:** click the widget or `omarchy-shell shell summon io.github.this-is-npc.omapass '{}'`; summoning a panel that is already open with the Remove dialog or the `⋯` menu showing leaves that dialog or menu and its keyboard focus as they are (tested); with the add form open it keeps the focus on the field being edited (tested), so a later Enter acts on it and never copies or types a password behind it. The list refresh of that summon waits until the dialog or menu is closed, because a refresh rebuilds the rows and would kill the menu (tested). A refresh that does rebuild the open row closes the menu and returns the keyboard to the panel (tested). Every summon of an open panel also asks the compositor again for the keyboard (`KeyboardPanel` primes Exclusive focus for 75 ms; tested only as far as the prime is requested, whether a notification, overlay or lock then yields the keyboard needs a live Hyprland). Closing the panel by hide, toggle, a click outside, or another bar panel taking over closes the row menu and the confirm dialog, and wipes the search, the selection and the form (tested). Escape closes the menu or the dialog and leaves the panel open (tested); it closes the panel when neither is open (tested)
-- **Search:** `/`; list with arrow keys or `j`/`k`; **Up** from the search field goes to the folder chips (**Left/Right** pick one, **Enter** filters, **Down** returns to the list); **Enter** (or a click on the row) copies password, or opens the add form when nothing matches; **Shift+Enter** (or **Ctrl+Enter**) types into the focused window and never copies; **Escape** clears the search, then leaves the search field, then closes (tested). Only these explicit actions copy or type a secret: no single letter or Space does
-- **Add:** `+` or **Ctrl+N**
-- **Panel position:** **Ctrl+P** toggles between centered on the bar and under the icon
-- **Add form:** **Left/Right** switches Account | Nostr; **Ctrl+G** generates password or Nostr key; **Ctrl+N** does nothing while the Remove dialog or the row menu is open, and in the form it starts a fresh one from any field (the typed password is wiped; tested); **Ctrl+E** show/hide password; **Enter** moves Folder, then Account, then Password, and saves there (Account) or generates the key from Account (Nostr); **Escape** cancels
-- **Row menu:** `m` or **Right** opens overflow; **Delete** or `x` removes (with confirmation); with the menu open, `u` copies the account, **Delete**/`x` removes and **Shift+Enter** types; **Enter** or a click runs the highlighted option (the first, "Copy account", when you open it), and **Space** does nothing there; in confirm dialog: **Enter**, **Escape**, **Tab**
+## Contributing
 
-## Look
+[docs/design.md](docs/design.md) explains how omapass is built; [docs/testing.md](docs/testing.md) covers the test sandbox, the QML runtime tests and the git hooks.
 
-Logins are grouped into one card per folder, and in "All" the arrow keys go through the cards in the order shown; the chips above the list filter by folder and show how many logins each holds. Copy and the actions menu appear on the selected row. A fixed strip at the bottom shows key hints at rest (Enter, Shift+Enter, +, the menu) and the result of an action (copied, saved, or an error), so the panel never changes height for it; the copy button on the row also turns into a check mark, on the copied item only (two rows with the same account in different folders are told apart by folder). The `⋯` menu is compact, lists its shortcuts (`u`, `⇧↵`, `Del`, all working while it is open) and opens below the row, or above it when there is no room, without covering the search. Remove and Replace, their confirmation button and errors use the theme's urgent color. Only the selected row shows its buttons, so names get the full width. A name too long for its row is cut off with an ellipsis; the Remove and Replace dialogs wrap the whole name, so two names that differ only at the end can be told apart there. In "All", the height allows for up to three card headers on top of eight rows. The panel is as tall as its content, up to about eight rows, then the list scrolls. With more folders than fit, the chips scroll sideways (mouse wheel or Left/Right). When one folder is selected, its card omits the repeated folder header (a folder may even be named "all"). While the first list is loading, the panel says "Loading…" and no key opens the add form (Enter, `+`, Ctrl+N; tested); only once the list has arrived empty does it say "No logins yet". When nothing matches, a "+ Add login" button (or Enter) opens the add form; it never saves by itself. The form starts with the open folder and, after a search with no match, the searched name; the Save button is dimmed until the form is complete, and a generated password is always masked, even if the field was revealed, with only "Generated · N chars" shown. Mouse and keyboard share one highlight in the list, the chips, the search field, the row menu and the confirm dialog. Only real pointer motion moves it: a pointer resting where a row, chip, menu option or button appears does not, so Enter acts on what the keyboard chose. After the panel opens, the first pointer position only sets a baseline, so a mouse user may need one more small movement before the highlight follows. The selected row is tracked as one item (account, kind and folder), not by position: when a refresh (every open, save or remove) moves or changes rows, the highlight stays on the same item, and Enter or Shift+Enter acts on it. If that item is gone, the first row is highlighted and Enter acts on that one (tested with a refresh that inserts a row before the selected one). Two items with the same account and kind in different folders show as two rows, both with a warning sign; Copy, Type and Remove pass the row's folder to the helper (`--folder=`), and the Remove dialog names the folder ("Remove dup from Work?"). A write that fails with exit 6 (the keyring file may be damaged) opens a dialog with the helper's full message and a Dismiss button, which stays until dismissed, and also sends a notification; other errors stay a short line in the footer. A failed save keeps the typed or generated password in the form, so it can be retried; it is wiped only by a successful save, by cancelling the form, by starting a fresh form with Ctrl+N or by closing the panel. The Replace question names the item from the loaded list, in every folder that holds it (exact or NFC-equal name): "Replace the secret for github in Work?". When the form's folder differs it adds that the item moves there, and says the old password (for a Nostr key, "the Nostr key" and the old key) is lost for good. It names no folder for an item the list does not show. The default button is Cancel. A refresh asked for while a list is running (after a save or a remove, or a second summon) runs again when that list ends, so the rows never keep a removed item. Helpers that only read are bounded: the list at 60 s ("The keyring did not answer in time"), a copy at 20 s ("Copy timed out") and the focus snapshot at 8 s (Type is then unavailable); `type` and `store` have no bound, because cutting them would leave half a secret in the target window or an unfinished write. Nostr keys show a key icon and an `nsec` tag, and read "Copy key" and "Type key". The panel frame uses your Hyprland window border: its width (`general:border_size`) and color or gradient (`general:col.active_border`), read with `hyprctl` each time the panel opens. Corners, cards, chips and buttons follow `decoration:rounding` through the shell's `Style.cornerRadius`. On other compositors the panel keeps the shell's default border.
+## Requirements
 
-## Panel position
-
-The panel opens centered on the bar by default. The button next to Add (or **Ctrl+P**) switches it: 󰉣 moves the panel under the icon, 󰉠 centers it again. The choice is saved as the `centerPanel` setting in `~/.config/omarchy/shell.json`, so it can also be set from the CLI:
-
-```sh
-omarchy bar set io.github.this-is-npc.omapass centerPanel false --json
-```
-
-CLI:
-
-```
-omapass list
-omapass doctor                     # read-only keyring check
-omapass get -- <account>
-omapass add --account <id> --folder <name> [--kind K] [--replace]
-omapass store --account <id> --folder <name> [--kind K] [--replace]   # secret on stdin
-omapass exists --account <id> [--kind K] [--folder F]   # exit 0 or 1
-omapass rm [--kind K] [--folder F] -- <account>
-omapass copy -- <account>          # clipboard
-omapass type -- <account>          # type into focused window
-
-omapass generate-password
-omapass generate-nostr --account <id> --folder <name> [--replace]
-
-omapass nostr new [--account <id>] [--folder <name>]
-omapass nostr show-npub [--account <id>]
-omapass nostr show-nsec [--account <id>]   # asks for confirmation; needs a terminal on stdin and stdout
-omapass nostr rm [--account <id>]
-```
-
-`nostr new` defaults to `account=nostr:default` and `folder=Nostr` when flags are omitted.
-
-`omapass doctor` checks the keyring and changes nothing: it parses each keyring file, checks the `default` alias, reads every item back through the Secret Service and applies the write guard's rule. It prints counts and item ids, never secrets. Exit 0 means healthy, 1 a problem (lines start with `FAIL`), 10 the default keyring is locked: doctor never unlocks it, so unlock it and run it again. See [How to check the keyring after an omapass write error](docs/how-to-check-the-keyring.md).
-
-Secrets never appear in the list UI.
-
-**Autotype:** the panel captures the focused window when it opens. Typing runs after the panel closes; if focus changes before typing starts, the operation aborts with an error instead of typing into the wrong window. Because the panel is closed by then, a failure (exit 8 focus changed, exit 9 typing failed, or any other) is shown as an Omarchy notification from `omarchy-notification-send`, titled "omapass", with the helper's error text and never the secret. The helper types one character per `wtype` call. Before each character it re-reads the focused window and the layer-shell surfaces (launcher, menu); if focus changed, if any layer appeared, vanished or was replaced since typing started, or if either cannot be read, it aborts and the rest of the secret is not sent. The panel's own layer stays mapped for its 120 ms fade-out after the panel closes, so before `type` takes that starting set it waits up to 1 s until no `omarchy-keyboard-panel` layer is mapped (the panel, its `-dismiss` twins on other screens, and any other Omarchy panel that is open); if one stays, it aborts (exit 8, "keyboard panel still open"). On Hyprland it also asks whether a session lock is active; if that query fails, hangs, answers something other than a non-empty list of monitor objects, or every monitor is blocked only by `WORKSPACE` (Hyprland stops at that reason before it reaches the lock; Omarchy's own script calls this "undetermined"), it aborts too (exit 8, "session lock state unknown"; see Limitations). On Hyprland a window is identified by its `stableId` (never reused) and a layer by its `stableId`; when Hyprland does not report one (this host's `hyprctl layers -j` has none, `activewindow -j` has), the window falls back to its `address` and a layer to its namespace, `address`, `pid` and geometry (`x`, `y`, `w`, `h`). Every Omarchy panel shares one namespace and one pid, so the geometry and the wait above are what tell a panel that reuses a freed address apart from the one that was there. Each query costs 4 to 7 ms per character on an idle Hyprland machine (median of 40 runs of the first two queries: 4.6 ms and 6.4 ms in two measurements) and about 13 ms each at a load average of 33 (median of 40 runs of each of the three: 12.0, 13.2 and 13.1 ms); the `wtype` spawn is not included. Every `hyprctl`, `niri` and `wtype` call has a 2 second timeout: if one hangs, `type` stops (exit 8 for a compositor query, 9 for `wtype`) and the rest of the secret is not sent.
-
-**Item on stdin:** the panel passes the item it acts on to `copy`, `type` and `clear` as one JSON object on stdin, with `--item-stdin`: `{"account": "...", "folder": "...", "kind": "..."}` (strings; `kind` is optional) and, for `type`, `"compositor"` and `"expect_id"`. Account names and the window id therefore stay out of the process's command line, which other local users can read in `/proc` (this host mounts `/proc` without `hidepid`). The flags `--account`, `--folder`, `--kind`, `--compositor` and `--expect-id` still work for the CLI; combining any of them (even an empty `--folder=`) or a positional name with `--item-stdin`, a missing account, an unknown field or a value that is not a string is refused (exit 1) before the keyring is read. `store` and `copy-text` already take their secret on stdin. The panel's `pkill` pattern for stopping a running `type` matches `type --item-stdin` as well.
-
-**Control characters in a stored secret:** `add` and `store` never store them, but an item made by another app can hold a line break, tab or escape sequence. `type` would send a line break as Return and submit the form, so `type` and `copy` refuse such a secret (exit 13, "stored secret has control characters or line breaks; not typed" or "not copied") and send nothing; the secret is not trimmed or changed. `get` still prints it, for scripts. The check covers C0, DEL, C1 and U+2028/U+2029 (the same set `add` rejects); the one trailing newline of a legacy raw item is dropped before it.
-
-**Typing and `/tmp`:** `wtype` 0.4 writes a keymap that names each typed character to a file `/tmp/wtype-XXXXX`. The path is compiled into the binary and ignores `TMPDIR` (checked with `strings`). The file is mode 0600 and unlinked at once, but on a disk-backed `/tmp` the characters could reach the disk. Before it reads the secret, `type` therefore refuses (exit 9, "refusing to type: ...") unless `/tmp` is a directory on tmpfs or ramfs and, if other users can write to it, has the sticky bit. Stock Omarchy mounts `/tmp` as tmpfs.
-
-Residual risk: the focus check and the keystrokes are not atomic. `wtype` sends to whichever surface is focused when it sends, so focus can still change in the short gap after a check, and up to one character can reach the wrong window. Avoid switching windows or workspaces while autotype runs. The panel closes when typing starts and the target window keeps focus, so Escape cannot reach it. To stop typing, reopen the panel on any screen: opening sends SIGTERM to every running `type` of this plugin (the panel's own and, through `pkill` on the helper's command line, one started from another screen's panel; tested), and at most the character already handed to `wtype` is still typed. Only compositor support for targeting a specific surface would remove this.
-
-**Exit codes:** 0 success; 1 other errors; 2 bad arguments (argparse); 3 no compositor focus, including a missing, failing or hung `hyprctl` or `niri` (`focus-snapshot`, and `type` without `--compositor` and `--expect-id`; the panel always passes both, so it gets 8 instead, shown as "Focus changed"); 4 the item already exists (`add`, `store` without `--replace`), including when another omapass store of the same new name held the write lock first and created it; 5 nothing was written because the keyring is not safe to write (the message says "retry" when another app may have been writing), or because the write lock could not be had (see Write guard): "another omapass write is running; retry. Nothing was written." after 10 s, or "cannot open a safe omapass write lock; ..."; 6 the write could not be confirmed or the file is damaged (the message says to run `omapass doctor` and points to [How to check the keyring after an omapass write error](docs/how-to-check-the-keyring.md)); 7 unused (it was the look-alike refusal, which no longer exists); 8 `type` aborted because focus or the layer-shell surfaces changed, an omapass or other keyboard panel stayed open, a session lock was seen, or any of those could not be read or determined (nothing more is typed); 9 `wtype` failed or timed out, or `/tmp` is not safe for it; 10 the keyring or D-Bus cannot be reached, the default keyring is locked (the unlock was refused or dismissed) or there is none (any command that needs the keyring, including `exists`, which only returns 0 or 1 for a definite answer; the message is one line, "keyring unavailable: ...", never a traceback); 11 `add` or `store` with `--replace` found items whose names differ only in Unicode normalization; 12 several items share the account and kind (see Identity and overwrite) and the command would have to guess; 13 `copy` or `type` refused a stored secret with control characters. The helper never passes `wtype`'s own status through. `type --compositor` accepts `hyprland` or `niri`; anything else is a bad argument (2).
-
-**Clipboard:** `copy` and `copy-text` start a detached `clipboard-serve` helper. It runs `wl-copy --foreground --sensitive --type text/plain` as its own child and writes the secret to its stdin, never to argv or the environment. `--sensitive` keeps the text out of Omarchy clipboard history. wl-copy's temp buffer lives in `$XDG_RUNTIME_DIR`, not `/tmp`: the helper refuses to copy unless that directory is absolute, owned by you, mode 0700 and on tmpfs/ramfs, and it hands wl-copy (as `TMPDIR`) the resolved path it checked, not a symlink. The helper reports ok or fail after up to 0.1 s (`CLIPBOARD_START_S`; fail if wl-copy has already exited). It then keeps the copy until another copy replaces the selection (wl-copy exits by itself) or 30 seconds pass, and kills wl-copy, which empties the clipboard. It also stops when it is killed (wl-copy then dies with it). The copy can be pasted any number of times within those 30 seconds. Tested in the sandbox with headless sway and a `wl-paste --watch` history watcher (`tests/test_clipboard_wayland.py`): the copy can be pasted twice and the watcher does not end it, an unpasted copy is cleared by the TTL, another copy ends the helper and keeps its own content, killing the helper clears the clipboard, the secret is not in argv or the environment, and `copy-text` works end to end.
-
-Limits: the clipboard is not emptied after a paste, so for up to 30 seconds any process of your user, or any paste, can read the secret again (see Core dumps). The design depends on wl-clipboard 2.x buffering stdin in a temp file; the sandbox test fails if that changes.
-
-**Core dumps:** the helper sets `RLIMIT_CORE` to 0 and marks itself non-dumpable at startup, so a crash writes no core file and the kernel refuses same-user `ptrace` and `/proc/<pid>/mem` reads of the helper. Child processes inherit the core limit, and the `clipboard-serve` helper runs the same startup code. The non-dumpable flag does not survive `exec`, so `wl-copy`, `wtype` and `wl-paste` are dumpable again. They write no core file, but their memory is not protected from other processes of your user. In particular, any process of your user can read a running `wl-copy`'s buffer through `/proc/<pid>/fd/<n>` (Yama's `ptrace_scope` does not restrict that; the sandbox test `test_same_user_process_can_read_the_buffer` checks it), or simply run `wl-paste`. A same-user process can also read the whole unlocked keyring through the Secret Service. omapass therefore does not try to harden same-user memory further. It shortens how long `wl-copy` holds the secret instead (until another copy replaces it, or 30 seconds; see Clipboard). A crash of the shell while the add form holds a password can put it in a core file if the shell's core limit allows one (on a default Omarchy session it is unlimited and `systemd-coredump` stores the dump); the helper cannot prevent that.
-
-**CLI secrets:** `get` refuses to print a secret to an interactive terminal unless you pass `--yes`; piping stdout is fine.
-
-**Input limits:** `add` and `store` drop one trailing newline from piped input, then reject empty values, control characters (including line breaks and NUL), secrets over 4096 characters, and account, folder, or kind values over 256 characters. Account, folder, and kind also reject invisible Unicode characters and surrogates, which could spoof what the panel shows: format characters (category Cf: bidi controls, zero-width characters including U+200D, soft hyphen, tag characters) and the other default-ignorable or blank code points the standard library cannot classify, from a built-in list (hangul fillers U+115F, U+1160, U+3164, U+FFA0, combining grapheme joiner U+034F, Khmer vowels U+17B4 and U+17B5, Mongolian and other variation selectors U+180B to U+180F and U+FE00 to U+FE0F, the unassigned slots U+2060 to U+206F and U+FFF0 to U+FFF8, tag and variation selector supplement U+E0000 to U+E0FFF, and the blank braille pattern U+2800). Private-use characters are visible glyphs and stay allowed. Backslashes and leading or trailing spaces are fine in secrets. Leading and trailing spaces and non-ASCII spaces (NBSP, the U+2000 range, U+3000) are also accepted in account, folder and kind: they are not control or invisible characters.
-
-**Names:** account, folder, and kind are normalized to NFC. `add` and `store` refuse control characters and the invisible characters listed under Input limits (Cf, Cs and the built-in list); omapass has no look-alike check. It does not compare a new name with existing ones by skeleton, script or case, and it does not refuse leading or trailing spaces, non-ASCII spaces or mixed scripts, so `paypal`, `PayPal` and `pаypal` (Cyrillic `а`) are three different accounts; exit 7 is no longer used. `add` and `store` refuse (exit 4) only an account and kind that already exist; `--replace` replaces it. An item an older version stored in decomposed (NFD) form counts as the same account as its NFC name, so `--replace` with either spelling updates it and stores it in NFC. `list --json` adds a `warn` field per item, one of `control`, `invisible`, `duplicate` or empty, so items made by other apps are flagged too; the panel shows a warning sign (⚠) next to exactly those. Plain `list` prints control and invisible characters as escapes (`\x1b`, `\u3164`) instead of sending them to the terminal; `list --json` keeps the names as stored.
-
-**Storage format:** gnome-keyring writes a plaintext (empty-password) keyring's secrets raw but reads them back with key-file unescaping, so a literal `\n`, `\\`, a leading space, or a trailing backslash would change after a restart, and a `\n` could corrupt the file on the next write. omapass therefore stores each secret base64-encoded and tags the item with the attribute `enc=b64`; every read (`get`, `copy`, `type`, Nostr commands) decodes it. Account, folder (the item label), and kind are escaped by gnome-keyring itself and round-trip unchanged (checked in the sandbox). Items stored by older versions have no `enc` attribute: they are read as raw values, with one trailing newline dropped, and are rewritten in the encoded form the next time you replace them. `omapass doctor` (also run by `tests/sandbox/keyring-health.py`) reports an encrypted keyring file as "encrypted (not parsed)" without failing, and for an encrypted default keyring it only checks that items read back. For plaintext keyrings it reads every item back and fails if the write guard's rule (below) flags an item or the item count differs, or if an `enc=b64` item is not base64 of UTF-8 text. It counts as items every group except `[keyring]` and groups containing `:` (attributes and ACLs), as the daemon does, so ids such as `[0x1]` are checked like any other.
-
-**Write lock:** `store`, `add`, `generate-nostr`, `nostr new`, `rm`/`clear` and `nostr rm` take an exclusive `fcntl.flock` on `$XDG_RUNTIME_DIR/omapass.lock` (only if that directory is absolute, owned by you and mode 0700; otherwise `/tmp/omapass-<uid>.lock`). The lock file is opened with `O_NOFOLLOW` and mode 0600 and must be a regular file you own. The lock is held from the existence check through create, delete and verify, and the kernel releases it when the helper exits, even if it is killed. The helper waits up to 10 s for another omapass write, then exits 5 with "another omapass write is running; retry. Nothing was written."; if the lock file is unsafe it exits 5 with "cannot open a safe omapass write lock; ...". Invalid input is refused before the lock is taken. Two omapass stores of the same new name therefore run one after the other: one creates the item and the other exits 4, "already exists". The lock orders omapass processes only; see the residual race below.
-
-**Write guard:** before every one of those writes, with the lock held, the helper checks the default keyring and writes only if it is fully healthy. It finds the file from the daemon's own environment (`/proc/<pid>/environ` of the owner of `org.freedesktop.secrets`). If the file cannot be located, read or parsed, it exits with status 5 and writes nothing. An encrypted keyring (the file starts with the encrypted magic) is exempt from the file checks: the helper does not parse its header, and the write is confirmed only by reading it back through the Secret Service (see below). The guard reads the file once; it does not wait or read again. For a plaintext keyring (a GLib.KeyFile) there is one rule, "is this file safe to rewrite?" (`rewrite_risks` in `bin/omapass_lib/keyfile_guard.py`), and it is used before the write, after the write, and by `omapass doctor`, which the sandbox health check (`tests/sandbox/keyring-health.py`) runs, so the three cannot disagree. The rule asks, per item, whether our rewrite makes it worse than it already is. The daemon rewrites the value it serves as a raw `secret=` line (hex in `binary-secret=` if it is not UTF-8). The item is unsafe if that line would break the file, or would reload to a different value than the current lines reload to without our write, or if that reloaded value would not itself survive the next rewrite (the daemon watches the file and may reload it at any time, for example right after our write). So a value the daemon already loses on reload is not blocked: leading spaces or CR (`"  pad  "` reloads as `pad  `, before or after a restart), or an invalid escape such as `a\b`, whose bytes the rewrite leaves unchanged. A literal `\n` is always unsafe: once the daemon reloads the file it serves a newline, and the next rewrite would break the file. Before the write, the helper exits with status 5, writes nothing and prints only counts, never values, if an item is unsafe in that sense, or if a group is not served by the daemon, has an invalid `binary-secret=` (not hex), has both `secret=` and `binary-secret=` (the daemon keeps one and drops the other) or repeats either line, or if the file has a different number of items than the daemon serves. The daemon omits `secret=` for an empty secret and keeps a non-UTF-8 secret as hex; both are reloaded intact and allowed. Items count as in the daemon: every group except `[keyring]` and groups containing `:`. The item belongs to whichever app stored it: omapass cannot fix it. Remove or re-save it in that app, then retry. After an exit 6, see [How to check the keyring after an omapass write error](docs/how-to-check-the-keyring.md). **After the write** the helper polls for up to 2 s until the keyring reflects the change. Plaintext keyring: the file must hold the target (after a store, exactly one item with the same service, account and kind, tagged `enc=b64`, with the new base64 secret and label; after a clear, none), every item in it must pass the same rule, and the item count must be the count before the write plus or minus what the command did, so an item another app lost or damaged in the meantime is caught. Encrypted keyring: the file is not read. The Secret Service must show the target: after a store, exactly one item with our attributes (the daemon may add its own; attributes only the old item had are not copied), the expected label and the expected base64 secret; after a clear, none (a duplicate in another folder may remain). If the daemon cannot save the write (for example the keyring directory is read-only), the helper exits with status 6 and a short message. If the file stops parsing after the write, it exits with status 6 and a message to not log out or reboot and to back up the file, with a pointer to that page. If the check fails otherwise, it exits with status 6 and says the write could not be confirmed and must not be trusted. A `create` that returns no item also fails before any old copy is deleted. **Residual race:** the Secret Service has no lock and the write lock binds only omapass, so another app can still store a raw value between the check and the daemon's write. The post-write check detects such damage but cannot prevent it, and it cannot see a value the daemon already normalized or dropped cleanly (for example a malformed `binary-secret=` line) or an unrelated item another app added in that window (reported as a count mismatch). For an encrypted keyring there is no file check at all: only the daemon's memory view confirms the write.
-
-**Identity and overwrite:** an item is identified by account plus kind (a login and an nsec with the same account are different items). `add` and `store` exit with status 4 instead of replacing an existing item; pass `--replace` to overwrite it. Every replace creates a new encoded item and then deletes the old copies. The daemon takes a secret and a label as two calls, so an in-place update could stop between them; this order cannot (a kill leaves the old and the new item, each whole, tested in the sandbox by killing the helper after the create), and it never leaves a base64 secret without its tag. If only the delete fails, `get` prefers the encoded copy and rerunning `--replace` removes the leftover. The panel asks "Replace the secret for ...?" first. `get`, `copy`, `type`, `clear` and `exists` take `--kind` (default: plain login) and act on exactly one item. Two items can share account and kind in different folders (another app or an older version stored one). Then these commands refuse with exit 12, "ambiguous: 2 items in folders 'Home', 'Work'; pass --folder", and read, copy, type or remove nothing; `--folder VALUE` (the item's folder, its label) picks one, and `rm --folder VALUE -- <account>` removes only that one. `list --json` marks all rows that share account and kind `warn: "duplicate"`, in one folder or several. `store` and `add` without `--replace` refuse an existing account and kind whatever its folder (exit 4), so omapass does not create duplicates. If two stores of the same new name run at the same moment, the write lock makes them run one after the other: the first creates the item and exits 0, the others exit 4 ("already exists"), so exactly one item is left. Tested in the sandbox with four parallel stores of one name over 6 rounds (`tests/test_write_lock.py`). Another app is not bound by the lock. With `--replace` they merge copies only when all of them have the same folder; copies in several folders exit 12 and nothing is changed. Copies in the same folder count as one item: `get` prefers the encoded one, `rm` removes them all, and `store --replace` collapses them. Names are stored in NFC; these commands look the name up exactly as given first, then in NFC, then under any stored spelling that differs only in normalization, so a decomposed or composed spelling finds the stored item (as `store` already counted it) and an older item stored as typed stays reachable. An exact match always wins, so a lookup never returns a different item than the one named. A name that starts with `-` can be written `--account=-name` or after `--` (`get -- -name`, `rm -- -name`); the panel passes `--account=-name`. If a legacy keyring holds the same name in NFC and in NFD as two items, `--replace` refuses with exit 11 and changes nothing, because the two may hold different secrets. Remove the one you do not want with `rm -- <exact spelling>`, then retry.
-
-**Popout switch:** when another bar panel takes over, the panel closes: the typed password, the form, the search, the selection and any open menu or dialog are cleared, and the next open shows the plain list (tested). Escape with a dialog or menu open leaves the panel open.
-
-## Limitations
-
-- Each monitor's bar widget declares the IPC target `io.github.this-is-npc.omapass`. The shell routes summon, hide and toggle for a bar widget through the live bar, because a fixed IPC target only ever routes to one of the per-monitor instances (`shell.qml`). This repository has no test that two `IpcHandler`s share one target. `omarchy-shell shell summon` picks the instance on the focused monitor.
-- A copied password stays on the clipboard until another copy replaces it, or for 30 seconds at most, and can be pasted any number of times meanwhile. Any process of your user can read it in that time (see Core dumps).
-- The add form's generated password passes through the shell (QML) before it is saved, so a crash of the shell can leave it in a system core dump. The helper does not generate and store it in one step because the form lets you reveal and edit it before saving.
-- omapass does not detect look-alike names (homoglyphs such as Cyrillic `а` for Latin `a`, mixed scripts, leading or trailing spaces, non-ASCII spaces). They are stored and shown as typed, so check the name before copying. The panel copies, types and removes the account exactly as stored, including edge spaces. Only control characters and invisible characters (see Input limits) are rejected.
-- Autotype checks the focused window and the layer-shell surfaces before every character; if focus changes between the check and the keystroke, one character can reach the other window.
-- Layer detection compares against the layers present once omapass's own panel has unmapped. A launcher or menu that was already open before that is part of the baseline and is not detected. Hyprland's IPC JSON has no keyboard-interactivity field: `hyprctl -j layers` gives `address`, `x`, `y`, `w`, `h`, `alpha`, `namespace` and `pid` (checked on this host), so on Hyprland every layer counts, and niri reports `keyboard_interactivity`, so only layers that can take the keyboard count.
-- Notification keyboard mode is not detected. Omarchy's notification surface is one fixed-size layer per screen that stays mapped, and Super+Ctrl+comma ("Control notifications with the keyboard") only changes that layer's keyboard focus to exclusive, a layer-shell property none of the IPC fields above carries; no layer appears and the focused window does not change. If you enter that mode while omapass types, the remaining characters go to the notification deck, whose key handler selects, dismisses and invokes notifications. This follows from the shell source (`plugins/notifications/Service.qml`) and the IPC fields, and was not reproduced on a live desktop. Do not use it while autotype runs. The same reason means a notification popup does not abort typing on Omarchy: it is a card on the existing layer. The layer does unmap while a fullscreen window is shown and no notification is on screen, and that does abort typing.
-- Follow-up, not done: one in-compositor Lua request that checks focus and sends all keys would close the gap. It must map characters to keycodes for the user's layout (dead keys on us-intl) and refuse before typing if a character is unreachable.
-- The invisible-character check uses Cf and Cs plus a built-in list, not the full Unicode Default_Ignorable_Code_Point data, so rarer invisible characters can pass.
-- Autotype and a lock screen: a lock (hyprlock, Omarchy's lock) is an ext-session-lock surface, not a layer, and the focused window does not change, so the layer check cannot see it. On Hyprland, `type` asks `hyprctl monitors -j` before every character and aborts (exit 8, "session locked") when a monitor lists `LOCK` in `solitaryBlockedBy`; this is the signal Omarchy's own `omarchy-hyprland-session-locked` uses. If the monitors query fails, hangs or returns unexpected JSON, or every monitor is blocked only by `WORKSPACE`, the lock state is unknown and `type` stops (exit 8, "session lock state unknown"). Not detected: Hyprland stops listing reasons early on a monitor with no workspace, so a lock can go unseen there while another monitor can be read; the signal also stays set after a lock's client dies, which only makes `type` refuse (fail safe); it is missing on other Hyprland versions; and niri is not asked at all. A lock taken in the gap between the check and the keystroke can still receive one character. `type` sends no line break: a stored secret that contains one is refused (exit 13).
-- Reload, disable and monitor unplug destroy the panel without closing it. Quickshell then kills the helper it started (observed in `tests/qml/test_data_runtime.py`: SIGKILL, no handler runs). A `type` stops, with part of the secret already typed and no Enter. A `store` stops wherever it is: the helper creates the new item before it deletes an old copy, so the worst case is a duplicate, never a half-written item: after a kill the old and the new item both exist whole (tested in the sandbox, `tests/test_replace_kill.py`), `get` may return either, and `--replace` merges them if they share a folder, else `rm --folder` removes the unwanted one (the daemon, not the helper, writes the file). The helper has no SIGTERM handler for `store` or `type`. A killed shell (`omarchy-restart-shell`) does not run this: its helpers may outlive it (orphaned child processes of a restarted shell were seen on the development host), and the next panel open stops a `type` it finds.
-- `type` needs `/tmp` on tmpfs or ramfs (see Typing and `/tmp`); it refuses otherwise. `TMPDIR` cannot move `wtype`'s file.
-- `omapass nostr show-npub` needs `python-coincurve` or `python-secp256k1` (the PyPI packages `coincurve` and `secp256k1`). Without them the key is stored and the npub is not shown. Python's isolated mode (`-I`) skips only the user site, so a package of that name in the system site-packages is trusted: install them from your distribution.
-
-## Remove
-
-```sh
-omarchy plugin remove io.github.this-is-npc.omapass
-```
-
-Removal does not delete keyring entries.
+- `python-gobject` (PyGObject) and `libsecret`, for `gi.repository.Secret`
+- `gnome-keyring`
+- `wl-clipboard` for copying
+- `wtype` for typing, with `/tmp` on tmpfs or ramfs (the Omarchy default)
+- `hyprctl` (Hyprland) or niri, for the focus, layer and lock checks
+- Optional: `python-coincurve` or `python-secp256k1` to show a Nostr key's npub; without them the key is stored and no npub is shown
+- Optional: Docker, to run the tests
 
 ## License
 
-MIT. See LICENSE.
+MIT. See [LICENSE](LICENSE).
