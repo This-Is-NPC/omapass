@@ -1,0 +1,9 @@
+#!/usr/bin/python3
+# Stand-in for omarchy-notification-send in the QML tests: logs its argv as a
+# "notify" call in $OMAPASS_STUB_DIR/calls.jsonl and shows nothing.
+import json
+import os
+import sys
+
+with open(os.path.join(os.environ["OMAPASS_STUB_DIR"], "calls.jsonl"), "a") as f:
+    f.write(json.dumps({"cmd": "notify", "argv": sys.argv[1:]}) + "\n")

@@ -1,0 +1,35 @@
+#!/bin/bash
+# Run the Panel.qml runtime tests in a disposable container: headless sway,
+# quickshell, a stub helper. No keyring, no D-Bus, no network.
+#   scripts/test-qml                      # all QML tests
+#   scripts/test-qml bash                 # interactive shell in the sandbox
+#   scripts/test-qml --panel FILE         # run against another Panel.qml (mutation checks)
+# The repo is mounted read-only; the root filesystem is read-only too.
+set -euo pipefail
+SELF=$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")
+ROOT=$(cd "${SELF%/*}/.." && pwd)
+
+mounts=()
+if [ "${1:-}" = "--panel" ]; then
+  [ $# -ge 2 ] && [ -f "$2" ] || { echo "usage: scripts/test-qml --panel FILE [command...]" >&2; exit 2; }
+  mounts=(-v "$(/usr/bin/readlink -f -- "$2"):/override/Panel.qml:ro" -e OMAPASS_QML_PANEL=/override/Panel.qml)
+  shift 2
+fi
+
+# Tag by content of tests/qml-sandbox/ so parallel checkouts never share an image.
+SUM=$(cd "$ROOT/tests/qml-sandbox" && /usr/bin/sha256sum -- * | /usr/bin/sha256sum)
+IMAGE=omapass-qml-sandbox:${SUM:0:12}
+
+docker build -q -t "$IMAGE" -f "$ROOT/tests/qml-sandbox/Containerfile" "$ROOT/tests/qml-sandbox" >/dev/null
+
+exec "$ROOT/scripts/run-container" omapass-qml "$IMAGE" \
+  --network none \
+  --read-only \
+  --cap-drop ALL \
+  --security-opt no-new-privileges \
+  --tmpfs /tmp \
+  -e HOME=/tmp/home \
+  -e PYTHONDONTWRITEBYTECODE=1 \
+  -v "$ROOT:/src:ro" \
+  "${mounts[@]}" \
+  -- "$@"

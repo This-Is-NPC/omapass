@@ -8,7 +8,10 @@ BarWidget {
   id: root
   moduleName: "io.github.this-is-npc.omapass"
 
-  readonly property bool opened: panelLoader.item ? panelLoader.item.opened === true : false
+  // The shell's toggle reads this: a panel still waiting for the focus
+  // snapshot counts as open, so a second toggle closes it.
+  readonly property bool opened: panelLoader.item
+    ? panelLoader.item.opened === true || panelLoader.item.opening === true : false
 
   function open() {
     if (panelLoader.item) panelLoader.item.open()

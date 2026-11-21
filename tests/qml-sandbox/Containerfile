@@ -1,0 +1,25 @@
+# Disposable UI sandbox for omapass: a headless sway compositor plus
+# quickshell, so Panel.qml runs for real and can be driven with wtype.
+# It has no keyring, no D-Bus and no network access at run time; the tests
+# use a stub helper (tests/qml/stub-helper) instead of bin/omapass-keyring.
+#
+# Pinned like tests/sandbox/Containerfile: base image by digest, packages from
+# a dated Arch Linux Archive snapshot. To bump, follow the steps in that file.
+FROM archlinux@sha256:d4594bb2300cba11f41c2f27923eb56f63d9988909c402f9c95517d1e362c899
+
+ARG SNAPSHOT=2026/11/09
+RUN echo "Server = https://archive.archlinux.org/repos/$SNAPSHOT/\$repo/os/\$arch" \
+      > /etc/pacman.d/mirrorlist \
+    && pacman -Syu --noconfirm --needed \
+      python sway quickshell qt6-wayland wtype \
+    && pacman -Scc --noconfirm
+
+# /usr/bin/sway carries file capabilities, which an unprivileged container
+# user cannot use; a plain copy runs fine on the headless backend.
+RUN cp /usr/bin/sway /usr/local/bin/sway-nocap && useradd -m tester
+COPY entrypoint.sh /opt/qml-sandbox/entrypoint.sh
+RUN chmod 755 /opt/qml-sandbox/entrypoint.sh
+USER tester
+WORKDIR /src
+ENTRYPOINT ["/opt/qml-sandbox/entrypoint.sh"]
+CMD ["python3", "-I", "-m", "unittest", "discover", "-s", "tests/qml", "-v"]

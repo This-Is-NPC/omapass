@@ -18,12 +18,16 @@ Panel {
   readonly property var barIdentity: hostWidget || root
 
   property string searchText: ""
-  property int selectedIndex: 0
-  property int listIndex: 0
+  // The selected row is kept by identity (account, kind, folder), never by
+  // position: a list refresh may move rows, and Enter must act on the item
+  // the user saw selected. Empty or gone: the first row.
+  property string selectedId: ""
+  readonly property int listIndex: Math.max(0, Model.indexOfIdentity(visibleRecords, selectedId))
   property bool copiedFlash: false
   property string copyFlashText: ""
+  property bool flashOk: true
   property string view: "list"
-  property string folderFilter: "all"
+  property string folderFilter: Model.ALL_FOLDERS
   property int folderIndex: 0
   property bool actionsMenuOpen: false
   property string focusSection: "search"
@@ -33,93 +37,179 @@ Panel {
   property string addError: ""
   property string addKind: "account"
   property bool addPasswordVisible: false
+  // True while the password field holds the generated one; never the secret.
+  property bool addPasswordGenerated: false
+  // Set while the row menu needs more list height than a short list has.
+  property bool menuRoom: false
   property bool confirmOpen: false
   property string confirmMessage: ""
   property string confirmConfirmText: "Confirm"
+  property string confirmDetail: "This can't be undone."
   property string confirmAction: ""
   property var pendingRemoveRecord: null
   property var focusSnapshot: null
+  // Bumped by close(): an open() still waiting for the focus snapshot then
+  // shows nothing. `opening` is true during that wait.
+  property int openToken: 0
+  property bool opening: false
+  // Last pointer position seen over the panel, null until the first one.
+  property var lastPointer: null
+  // The pointer really moved (not just re-delivered hover) and every
+  // hover state has caught up with it.
+  signal pointerMoved()
   property bool popoutSwitchClosing: false
   // Where the panel opens: centered on the bar (default) or under the icon.
   // Stored in shell.json as this widget's "centerPanel" setting.
   readonly property bool centerPanel: setting("centerPanel", true) === true
 
+  // Bumped whenever the form's secrets are wiped or the form is reset, so a
+  // late helper reply (save, generate) can't put a secret back.
+  property int formToken: 0
+  property bool activateByReturn: false
+  property bool modifiedReturn: false
+
   function wipeSensitiveState() {
+    formToken++
     vault.forgetSecrets()
     addPassword = ""
     addPasswordVisible = false
-    if (passwordField)
-      passwordField.text = ""
+    addPasswordGenerated = false
+    addForm.clearPasswordField()
   }
-
 
   signal openOverflowForRow(int rowIndex)
 
   property bool savedFlash: false
+  // Which row the last successful copy came from; never the secret itself.
+  property string lastCopiedAccount: ""
+  property string lastCopiedKind: ""
+  property string lastCopiedFolder: ""
 
   readonly property color foreground: bar ? bar.foreground : Color.foreground
   readonly property color dim: Qt.darker(foreground, 1.55)
-  readonly property color selectedBackground: Color.menu.selectedBackground
   readonly property color selectedText: Color.menu.selectedText
   readonly property string contentFontFamily: bar ? bar.fontFamily : Style.font.family
 
+  // Window border from the user's Hyprland config; null until read (or on
+  // other compositors), which keeps the shell's default panel border.
+  readonly property var frameBorderSpec: hypr.border
+    ? {
+        color: hypr.border.colors[0],
+        widths: { top: hypr.border.width, right: hypr.border.width, bottom: hypr.border.width, left: hypr.border.width },
+        gradient: { colors: hypr.border.colors, angle: hypr.border.angle, enabled: hypr.border.colors.length > 1 },
+      }
+    : Border.surfaceSpec("popups", "border", Color.popups.border, Math.max(1, Style.space(2)))
+  readonly property color cardFill: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.03)
+  readonly property color cardBorder: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.12)
+  readonly property color accentColor: Color.accent
+  readonly property color urgentColor: Color.urgent
+  readonly property bool canSubmitAdd: addKind === "nostr"
+    ? String(addAccount || "").trim() !== ""
+    : (String(addFolder || "").trim() !== "" && String(addAccount || "").trim() !== "" && String(addPassword || "") !== "")
+  readonly property color subtleBorder: Qt.rgba(foreground.r, foreground.g, foreground.b, 0.18)
+
   readonly property int rowHeight: Style.space(36)
+  // The panel is as tall as its content; the list scrolls past the cap.
+  readonly property bool showListError: vault.listError !== "" && visibleRecords.length > 0
+  readonly property bool toastVisible: showListError || copiedFlash || savedFlash
+  // The footer strip is always there (hints or status), so the panel never
+  // changes height for a toast or the actions menu.
+  readonly property real footerHeight: Style.space(26)
+  readonly property real footerReserve: footerHeight + Style.space(4)
+  readonly property real desiredContentHeight: (view === "list" ? listView.chromeHeight : addForm.implicitHeight)
+    + (view === "list"
+      ? Style.space(8) + footerReserve
+        + (visibleRecords.length === 0 ? Style.space(140)
+          : Math.max(Math.min(listView.listContentHeight, listBudget), menuRoom ? Style.space(140) : 0))
+      : 0)
   readonly property int headerHeight: Style.space(20)
   readonly property var filteredRecords: Model.filterByFolder(Model.searchBy(vault.records, searchText), folderFilter)
-  readonly property var groups: folderFilter === "all" ? Model.groupByFolder(filteredRecords) : []
-  readonly property var visibleRecords: filteredRecords
+  readonly property var groups: folderFilter === Model.ALL_FOLDERS ? Model.groupByFolder(filteredRecords) : []
+  // Keyboard order is screen order: in "All" the folder cards, row by row.
+  readonly property var visibleRecords: folderFilter === Model.ALL_FOLDERS ? Model.flattenGroups(groups) : filteredRecords
+  // Account+kind pairs that exist in more than one folder.
+  readonly property var duplicateKeys: Model.duplicateKeys(vault.records)
   readonly property var folderChipIds: {
-    var chips = [{ id: "all", name: "All" }]
-    var names = Model.folders(vault.records)
-    for (var i = 0; i < names.length; i++)
-      chips.push({ id: names[i], name: names[i] })
+    var chips = [{ id: Model.ALL_FOLDERS, name: "All" }]
+    var all = Model.groupByFolder(vault.records)
+    for (var i = 0; i < all.length; i++)
+      chips.push({ id: all[i].name, name: all[i].name + " " + all[i].total })
     return chips
   }
   readonly property int maxListBodyHeight: rowHeight * 8
-  readonly property int listHeight: {
-    if (visibleRecords.length === 0)
-      return rowHeight * 2
-    if (folderFilter !== "all")
-      return Math.min(visibleRecords.length * rowHeight, maxListBodyHeight)
-    var body = 0
-    for (var g = 0; g < groups.length; g++) {
-      body += headerHeight + Style.space(4)
-      body += groups[g].records.length * rowHeight
-      if (g > 0)
-        body += Style.space(10)
-    }
-    return Math.min(body, maxListBodyHeight + groups.length * (headerHeight + Style.space(4)))
+  // In "All" the card headers are extra: up to three of them fit on top of
+  // the eight rows, so a few folders do not cut the last card.
+  readonly property int listBudget: maxListBodyHeight
+    + (folderFilter === Model.ALL_FOLDERS ? Math.min(groups.length, 3) * (headerHeight + Style.space(14)) : 0)
+
+  Component.onCompleted: hypr.refresh()
+
+  // A summon while the panel is open takes the keyboard back: a
+  // notification, an overlay or the lock may have taken it, and the panel
+  // stays open without it. KeyboardPanel primes Exclusive focus again.
+  function retakeKeyboard() {
+    if (!opened) return
+    panel.focusPrimed = false
+    panel.beginFocusPrime()
+  }
+
+  // A list refresh rebuilds the rows, and with them an open row menu, so a
+  // summon refreshes after the dialog or menu is gone.
+  property bool refreshAfterModal: false
+  onModalOpenChanged: {
+    if (modalOpen || !refreshAfterModal) return
+    refreshAfterModal = false
+    if (opened) vault.refresh()
   }
 
   function open() {
+    // A summon while a dialog or the row menu is open keeps it, and its
+    // focus, as it is. Moving focus to the search field would let the next
+    // Enter copy or type a secret behind it.
+    if (opened && modalOpen) {
+      refreshAfterModal = true
+      retakeKeyboard()
+      return
+    }
+    lastPointer = null
+    modifiedReturn = false
+    hypr.refresh()
+    vault.cancelType()
+    var token = ++openToken
+    opening = true
     vault.captureFocus(function(snap) {
+      // A close (or a newer open) since: the user gave up on this one.
+      if (token !== root.openToken)
+        return
+      opening = false
       root.focusSnapshot = snap
       vault.refresh()
       root.controller.show()
+      root.retakeKeyboard()
+      // A summon with the form open keeps the focus on the field being edited.
       Qt.callLater(function() {
-        if (root.opened) {
-          if (view === "list")
-            searchField.forceActiveFocus()
-          else {
-            focusSection = "addKind"
-            keyCatcher.forceActiveFocus()
-          }
-        }
+        if (root.opened && view === "list")
+          listView.searchField.forceActiveFocus()
       })
     })
   }
 
   function close() {
+    openToken++
+    opening = false
+    refreshAfterModal = false
     wipeSensitiveState()
-    closeConfirm()
+    confirmDialog.closeConfirm()
     searchText = ""
-    selectedIndex = 0
-    listIndex = 0
+    selectedId = ""
     copiedFlash = false
     copyFlashText = ""
+    lastCopiedAccount = ""
+    lastCopiedKind = ""
+    lastCopiedFolder = ""
     savedFlash = false
     view = "list"
-    folderFilter = "all"
+    folderFilter = Model.ALL_FOLDERS
     folderIndex = 0
     actionsMenuOpen = false
     focusSection = "search"
@@ -130,21 +220,16 @@ Panel {
     focusSnapshot = null
     root.controller.hide()
   }
+  // Another bar panel takes over: close exactly like close(), and tell
+  // KeyboardPanel (which reads the flag on close) why.
   function closeForPopoutSwitch() {
-    wipeSensitiveState()
-    closeConfirm()
-    addFolder = ""
-    addAccount = ""
-    addKind = "account"
-    focusSnapshot = null
-    if ("popoutSwitchClosing" in root)
-      popoutSwitchClosing = true
-    root.controller.hide()
+    popoutSwitchClosing = true
+    close()
+    Qt.callLater(function() { root.popoutSwitchClosing = false })
   }
 
-
   function toggle() {
-    if (root.opened) root.close()
+    if (root.opened || root.opening) root.close()
     else root.open()
   }
 
@@ -158,7 +243,8 @@ Panel {
     if (!record) return -1
     for (var i = 0; i < visibleRecords.length; i++) {
       var r = visibleRecords[i]
-      if (r.account === record.account && r.folder === record.folder)
+      if (r.account === record.account && r.folder === record.folder
+          && String(r.kind || "") === String(record.kind || ""))
         return i
     }
     return -1
@@ -172,35 +258,38 @@ Panel {
   function setListCursor(idx) {
     if (visibleRecords.length === 0) return
     focusSection = "list"
-    listIndex = Math.max(0, Math.min(visibleRecords.length - 1, idx))
-    selectedIndex = listIndex
+    selectedId = Model.identity(visibleRecords[Math.max(0, Math.min(visibleRecords.length - 1, idx))])
   }
 
   function selectRow(delta) {
     if (visibleRecords.length === 0) {
-      listIndex = 0
-      selectedIndex = 0
+      selectedId = ""
       return
     }
     focusSection = "list"
-    if (listIndex < 0) listIndex = 0
-    listIndex = (listIndex + delta + visibleRecords.length) % visibleRecords.length
-    selectedIndex = listIndex
+    selectedId = Model.identity(visibleRecords[(listIndex + delta + visibleRecords.length) % visibleRecords.length])
   }
 
-  function setFolderFilter(next) {
-    folderFilter = next
-    listIndex = 0
-    selectedIndex = 0
+  function syncFolderIndex() {
+    selectedId = ""
     for (var i = 0; i < folderChipIds.length; i++) {
-      if (folderChipIds[i].id === next) {
+      if (folderChipIds[i].id === folderFilter) {
         folderIndex = i
         break
       }
     }
   }
 
-  function flashCopied(message) {
+  function setFolderFilter(next) {
+    folderFilter = next
+    syncFolderIndex()
+  }
+
+  function flashCopied(message, ok, record) {
+    flashOk = ok !== false
+    lastCopiedAccount = flashOk && record ? String(record.account || "") : ""
+    lastCopiedKind = flashOk && record ? String(record.kind || "") : ""
+    lastCopiedFolder = flashOk && record ? String(record.folder || "") : ""
     copyFlashText = message
     copiedFlash = true
     copiedTimer.restart()
@@ -214,186 +303,113 @@ Panel {
   function togglePanelPosition() {
     if (settingProc.running)
       return
-    settingProc.command = ["omarchy-bar", "set", moduleName, "centerPanel", centerPanel ? "false" : "true", "--json"]
+    settingProc.command = ["/usr/share/omarchy/bin/omarchy-bar", "set", moduleName, "centerPanel", centerPanel ? "false" : "true", "--json"]
     settingProc.running = true
   }
 
   function openAddView() {
+    // Until the first list arrives, existing logins are unknown.
+    if (vault.loading || modalOpen)
+      return
+    formToken++
+    // Keyring state is unknown: adding could overwrite existing logins.
+    if (vault.listError !== "") {
+      vault.refresh()
+      return
+    }
+    // Carry the context over: the open folder, or the name just searched for.
+    var typed = searchText.trim()
     view = "add"
     addKind = "account"
-    addFolder = ""
-    addAccount = ""
-    addPassword = ""
+    addFolder = folderFilter !== Model.ALL_FOLDERS ? folderFilter : ""
+    addAccount = typed !== "" && visibleRecords.length === 0 ? typed : ""
     addError = ""
-    addPasswordVisible = false
-    focusSection = "addKind"
-    Qt.callLater(function() {
-      if (root.opened) keyCatcher.forceActiveFocus()
-    })
-  }
-
-  function cancelAdd() {
     wipeSensitiveState()
-    addFolder = ""
-    addAccount = ""
-    addError = ""
-    addKind = "account"
-    view = "list"
+    focusSection = "addFields"
     Qt.callLater(function() {
-      if (root.opened) searchField.forceActiveFocus()
+      if (!root.opened) return
+      addForm.focusFirstEmpty()
     })
   }
 
-  function saveAdd() {
-    addError = ""
-    var secret = addPassword
-    addPassword = ""
-    if (passwordField)
-      passwordField.text = ""
-    vault.store(addAccount, addFolder, secret, function(ok, err) {
-      if (ok) {
-        addFolder = ""
-        addAccount = ""
-        addError = ""
-        view = "list"
-        flashSaved()
-        Qt.callLater(function() {
-          if (root.opened) searchField.forceActiveFocus()
-        })
-      } else {
-        addError = err
-      }
-    })
+  function saveAdd(replace) {
+    addForm.saveAdd(replace)
   }
 
   function copyRecord(record) {
-    if (!record) return
-    vault.copy(record.account)
-    flashCopied("Copied password")
+    if (!record || confirmOpen) return
+    vault.copy(record.account, function(ok, err, code) {
+      if (!ok && confirmDialog.reportDamaged(err, code))
+        return
+      flashCopied(ok ? (Model.isNostr(record) ? "Copied key" : "Copied password") : (err || "Could not copy"), ok, record)
+    }, record.kind, record.folder)
   }
 
   function copyAccount(record) {
-    if (!record) return
-    vault.copyText(record.account)
-    flashCopied("Copied account")
+    if (!record || confirmOpen) return
+    vault.copyText(record.account, function(ok, err) {
+      flashCopied(ok ? "Copied account" : (err || "Could not copy"), ok)
+    })
   }
 
   function typeRecord(record) {
-    if (!record) return
+    if (!record || confirmOpen) return
     var snap = root.focusSnapshot
     if (!snap || !snap.id) {
-      flashCopied("Type unavailable")
+      flashCopied("Type unavailable", false)
       return
     }
+    // The panel is closed by then: report a failure by notification.
     vault.type(record.account, snap, function(ok, err) {
       if (!ok)
-        flashCopied(err || "Type aborted")
-    })
+        vault.notifyTypeFailure(err || "Type aborted")
+    }, record.kind, record.folder)
     root.close()
   }
 
-  function accountExists(account) {
-    var nick = String(account || "").trim()
-    if (!nick) return false
-    for (var i = 0; i < vault.records.length; i++) {
-      if (vault.records[i].account === nick) return true
-    }
-    return false
+  // The keyboard goes to the field of the current view.
+  function focusInput() {
+    if (view === "add")
+      (addKind === "nostr" ? addForm.accountField : addForm.passwordField).forceActiveFocus()
+    else
+      listView.searchField.forceActiveFocus()
   }
 
-  function closeConfirm() {
-    confirmOpen = false
-    confirmAction = ""
-    confirmMessage = ""
-    pendingRemoveRecord = null
-  }
-
-  function handleConfirm() {
-    if (confirmAction === "remove") {
-      var record = pendingRemoveRecord
-      var account = record ? record.account : ""
-      closeConfirm()
-      if (!account) return
-      vault.remove(account, function(ok) {
-        if (ok) flashCopied("Removed")
-      })
-    } else if (confirmAction === "replaceNostr") {
-      closeConfirm()
-      doGenerateNostr(true)
-    } else {
-      closeConfirm()
-    }
-  }
-
-  function generateAddPassword() {
-    vault.generatePassword(function(pw) {
-      if (!pw) {
-        addError = "Could not generate password"
-        return
-      }
-      addPassword = pw
-      if (passwordField)
-        passwordField.text = pw
-      flashCopied("Generated password")
+  function focusSearchSoon() {
+    Qt.callLater(function() {
+      if (root.opened) listView.searchField.forceActiveFocus()
     })
   }
 
-  function doGenerateNostr(replace) {
-    var nick = String(addAccount || "").trim()
-    var fold = String(addFolder || "").trim() || "Nostr"
-    vault.generateNostr(nick, fold, function(ok, msg) {
-      if (ok) {
-        addPassword = ""
-        addFolder = ""
-        addAccount = ""
-        addError = ""
-        view = "list"
-        vault.refresh()
-        flashSaved()
-        Qt.callLater(function() {
-          if (root.opened) searchField.forceActiveFocus()
-        })
-      } else {
-        addError = msg || "Failed to generate Nostr key"
-      }
-    }, replace === true)
+  function focusCatcher() {
+    keyCatcher.forceActiveFocus()
   }
 
-  function generateNostrKey() {
-    addError = ""
-    var nick = String(addAccount || "").trim()
-    if (!nick) {
-      addError = "Need a nickname in Account"
-      return
-    }
-    if (accountExists(nick)) {
-      confirmAction = "replaceNostr"
-      confirmMessage = "Replace the secret for " + nick + "?"
-      confirmConfirmText = "Replace"
-      confirmOpen = true
-      return
-    }
-    doGenerateNostr(false)
+  function generateNostr(replace) {
+    addForm.doGenerateNostr(replace)
   }
 
-  function removeRecord(record) {
-    if (!record) return
-    confirmAction = "remove"
-    pendingRemoveRecord = record
-    confirmMessage = "Remove " + record.account + " from omapass?"
-    confirmConfirmText = "Remove"
-    confirmOpen = true
+  // Give the keys back to the panel after a dialog or menu is gone.
+  function refocusCatcher() {
+    if (opened && !confirmOpen) keyCatcher.forceActiveFocus()
   }
 
-  function copySelected() {
-    copyRecord(currentRecord())
+  // While a dialog or the row menu is open, only it may act: no key may
+  // copy or type a secret behind it.
+  readonly property bool modalOpen: confirmOpen || actionsMenuOpen
+
+  function copySelected(record) {
+    if (modalOpen) return
+    copyRecord(record || currentRecord())
   }
 
   function copyAccountSelected() {
+    if (modalOpen) return
     copyAccount(currentRecord())
   }
 
   function typeSelected() {
+    if (modalOpen) return
     typeRecord(currentRecord())
   }
 
@@ -403,6 +419,12 @@ Panel {
   }
 
   function handleEnter(event) {
+    if (modalOpen || listLoading) return
+    // Nothing to copy: Enter only opens the form, it never saves.
+    if (visibleRecords.length === 0 && vault.listError === "") {
+      openAddView()
+      return
+    }
     if (event.modifiers & Qt.ShiftModifier || event.modifiers & Qt.ControlModifier)
       typeSelected()
     else
@@ -411,48 +433,42 @@ Panel {
 
   function handleEscape() {
     if (confirmOpen) {
-      closeConfirm()
+      confirmDialog.closeConfirm()
       return
     }
     if (view === "add") {
-      cancelAdd()
+      addForm.cancelAdd()
       return
     }
-    if (searchField.activeFocus && searchText !== "") {
+    if (listView.searchField.activeFocus && searchText !== "") {
       searchText = ""
       return
     }
-    if (searchField.activeFocus && searchText === "") {
+    if (listView.searchField.activeFocus && searchText === "") {
       keyCatcher.forceActiveFocus()
       return
     }
     root.close()
   }
 
-  onSearchTextChanged: {
-    listIndex = 0
-    selectedIndex = 0
-  }
+  onSearchTextChanged: selectedId = ""
 
-  onFolderFilterChanged: {
-    listIndex = 0
-    selectedIndex = 0
-    for (var i = 0; i < folderChipIds.length; i++) {
-      if (folderChipIds[i].id === folderFilter) {
-        folderIndex = i
-        break
-      }
-    }
-  }
+  onFolderFilterChanged: syncFolderIndex()
 
-  onVisibleRecordsChanged: {
-    if (listIndex >= visibleRecords.length)
-      listIndex = visibleRecords.length > 0 ? 0 : 0
-    selectedIndex = listIndex
-  }
+  property alias notifyCommand: vault.notifyCommand
+  property alias vault: vault
+  property alias confirmCard: confirmDialog
+  // Read-only views for the QML runtime tests.
+  readonly property int loadedRecordCount: vault.records.length
+  readonly property string listError: vault.listError
+  readonly property bool listLoading: vault.loading
 
   Vault {
     id: vault
+  }
+
+  HyprBorder {
+    id: hypr
   }
 
   Process {
@@ -473,7 +489,12 @@ Panel {
     id: copiedTimer
     interval: 1200
     repeat: false
-    onTriggered: copiedFlash = false
+    onTriggered: {
+      copiedFlash = false
+      lastCopiedAccount = ""
+      lastCopiedKind = ""
+      lastCopiedFolder = ""
+    }
   }
 
   Timer {
@@ -485,7 +506,7 @@ Panel {
 
   Shortcut {
     sequences: ["Ctrl+N"]
-    enabled: root.opened && !folderField.activeFocus && !accountField.activeFocus && !passwordField.activeFocus
+    enabled: root.opened
     onActivated: root.openAddView()
   }
 
@@ -498,17 +519,9 @@ Panel {
   Shortcut {
     sequences: ["Delete"]
     enabled: root.opened && root.view === "list" && root.focusSection === "list"
-             && !searchField.activeFocus && !root.actionsMenuOpen && !root.confirmOpen
-    onActivated: root.removeRecord(root.currentRecord())
+             && !listView.searchField.activeFocus && !root.actionsMenuOpen && !root.confirmOpen
+    onActivated: confirmDialog.removeRecord(root.currentRecord())
   }
-
-  Shortcut {
-    sequences: ["Shift+Return", "Shift+Enter", "Ctrl+Return", "Ctrl+Enter"]
-    enabled: root.opened && root.view === "list" && !searchField.activeFocus
-             && !folderField.activeFocus && !accountField.activeFocus && !passwordField.activeFocus
-    onActivated: root.typeSelected()
-  }
-
 
   KeyboardPanel {
     id: panel
@@ -518,39 +531,35 @@ Panel {
     open: root.opened
     centerOnBar: root.centerPanel
     focusTarget: keyCatcher
+    borderSpec: root.frameBorderSpec
     contentWidth: panel.fittedContentWidth(Style.space(380))
-    contentHeight: panel.fittedContentHeight(Style.space(480), Style.space(800))
+    contentHeight: panel.fittedContentHeight(root.desiredContentHeight, Style.space(800))
 
     PanelKeyCatcher {
+      PointerTracker { panel: root }
 
       Keys.onPressed: function(event) {
-        if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_N) {
-          if (!searchField.activeFocus && !folderField.activeFocus
-              && !accountField.activeFocus && !passwordField.activeFocus) {
-            root.openAddView()
-            event.accepted = true
+        // The shell's catcher reports Shift/Ctrl+Enter as a plain activate;
+        // take it here so it types and the deferred copy below skips it.
+        if ((event.key === Qt.Key_Return || event.key === Qt.Key_Enter)
+            && (event.modifiers & (Qt.ShiftModifier | Qt.ControlModifier))
+            && !keyCatcher.blocked) {
+          // Flag only where a plain Enter would copy, so the deferred copy
+          // below consumes it; elsewhere nothing is left behind.
+          if (root.view === "list" && root.focusSection === "list" && !root.confirmOpen) {
+            root.modifiedReturn = true
+            root.typeSelected()
           }
+          event.accepted = true
+          return
+        }
+        if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_N) {
+          root.openAddView()
+          event.accepted = true
           return
         }
         if (root.view === "add" && root.focusSection === "addKind" && !root.confirmOpen) {
-          if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_G) {
-            if (root.addKind === "nostr") root.generateNostrKey()
-            else root.generateAddPassword()
-            event.accepted = true
-            return
-          }
-          if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_E && root.addKind === "account") {
-            root.addPasswordVisible = !root.addPasswordVisible
-            event.accepted = true
-            return
-          }
-          if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_1) {
-            root.addKind = "account"
-            event.accepted = true
-            return
-          }
-          if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_2) {
-            root.addKind = "nostr"
+          if (addForm.handleCtrlKey(event, true)) {
             event.accepted = true
             return
           }
@@ -560,12 +569,12 @@ Panel {
       }
       id: keyCatcher
       anchors.fill: parent
-      blocked: searchField.activeFocus || folderField.activeFocus || accountField.activeFocus
-               || passwordField.activeFocus || root.actionsMenuOpen
+      blocked: listView.searchField.activeFocus || addForm.folderField.activeFocus
+               || addForm.accountField.activeFocus || addForm.passwordField.activeFocus || root.actionsMenuOpen
 
       onMoveRequested: function(dx, dy) {
         if (root.confirmOpen) {
-          confirmDialog.selectedIndex = confirmDialog.selectedIndex === 0 ? 1 : 0
+          confirmDialog.toggleSelection()
           return
         }
         if (root.view === "add") {
@@ -573,39 +582,17 @@ Panel {
             root.addKind = root.addKind === "account" ? "nostr" : "account"
           return
         }
-        if (root.view !== "list") return
-        if (root.focusSection === "folders") {
-          if (dx !== 0)
-            root.folderIndex = Math.max(0, Math.min(root.folderChipIds.length - 1, root.folderIndex + dx))
-          else if (dy > 0)
-            root.focusSection = "search"
-          return
-        }
-        if (root.focusSection === "search") {
-          if (dy > 0 && root.visibleRecords.length > 0)
-            root.selectRow(1)
-          else if (dy < 0 && root.folderChipIds.length > 0)
-            root.focusSection = "folders"
-          return
-        }
-        if (root.focusSection === "list") {
-          if (dx > 0) {
-            root.openSelectedOverflow()
-            return
-          }
-          if (dy !== 0)
-            root.selectRow(dy)
-        }
+        if (root.view === "list") listView.move(dx, dy)
       }
 
       onCloseRequested: root.handleEscape()
       onTabRequested: function(direction) {
         if (root.confirmOpen) {
-          confirmDialog.selectedIndex = confirmDialog.selectedIndex === 0 ? 1 : 0
+          confirmDialog.toggleSelection()
           return
         }
         if (root.view === "add" && root.focusSection === "addKind") {
-          folderField.forceActiveFocus()
+          addForm.folderField.forceActiveFocus()
           return
         }
         root.switchPanel(direction)
@@ -617,48 +604,31 @@ Panel {
           root.openAddView()
           return
         }
-        if (root.view !== "list") return
-        if (t === "/")
-          searchField.forceActiveFocus()
-        else if (t === "m" || t === "M")
-          root.openSelectedOverflow()
-        else if (t === "u" || t === "U")
-          root.copyAccountSelected()
-        else if (t === "p" || t === "P")
-          root.copySelected()
-        else if (t === "t" || t === "T")
-          root.typeSelected()
-        else if ((t === "x" || t === "X") && root.focusSection === "list")
-          root.removeRecord(root.currentRecord())
+        if (root.view === "list") listView.handleTextKey(t)
       }
 
       onDeleteRequested: {
         if (root.confirmOpen) return
         if (root.view === "list" && root.focusSection === "list")
-          root.removeRecord(root.currentRecord())
+          confirmDialog.removeRecord(root.currentRecord())
       }
 
       onActivateRequested: {
+        var byReturn = root.activateByReturn
+        root.activateByReturn = false
         if (root.confirmOpen) {
           if (confirmDialog.selectedIndex === 0)
-            root.closeConfirm()
+            confirmDialog.closeConfirm()
           else
-            root.handleConfirm()
+            confirmDialog.handleConfirm()
           return
         }
         if (root.view === "add") {
-          if (root.focusSection === "addKind") {
-            folderField.forceActiveFocus()
-            return
-          }
-          if (passwordField.activeFocus) {
-            root.saveAdd()
-            return
-          }
-          if (accountField.activeFocus && root.addKind === "nostr") {
-            root.generateNostrKey()
-            return
-          }
+          addForm.activate()
+          return
+        }
+        if (root.visibleRecords.length === 0 && vault.listError === "") {
+          root.openAddView()
           return
         }
         if (root.focusSection === "folders") {
@@ -666,723 +636,52 @@ Panel {
             root.setFolderFilter(root.folderChipIds[root.folderIndex].id)
           return
         }
-        if (root.focusSection === "list") {
-          root.copySelected()
+        // Only Enter copies; Space activates chips and buttons but never a
+        // secret.
+        if (root.focusSection === "list" && byReturn) {
+          // Deferred: the panel's own key handler may run after this one and
+          // flag a Shift/Ctrl+Enter, which types instead. The row is taken
+          // now: a list refresh before then must not change the target.
+          var chosen = root.currentRecord()
+          Qt.callLater(function() {
+            if (root.modifiedReturn) {
+              root.modifiedReturn = false
+              return
+            }
+            root.copySelected(chosen)
+          })
           return
         }
         if (root.focusSection === "search")
-          searchField.forceActiveFocus()
+          listView.searchField.forceActiveFocus()
       }
 
-      Column {
-        id: topChrome
-        width: parent.width
-        spacing: Style.space(8)
+      // Emitted just before activateRequested, for Return/Enter only.
+      onReturnRequested: root.activateByReturn = true
 
-        RowLayout {
-          width: parent.width
-          spacing: Style.space(6)
-          visible: root.view === "list"
-
-          TextField {
-            id: searchField
-            Layout.fillWidth: true
-            placeholderText: "Search"
-            text: root.searchText
-            font.family: contentFontFamily
-            foreground: root.foreground
-            font.pixelSize: Style.font.body
-            verticalPadding: Style.space(4)
-            hasCursor: root.focusSection === "search" && !activeFocus
-            onTextChanged: root.searchText = text
-            onActiveFocusChanged: if (activeFocus) root.focusSection = "search"
-            onHoveredChanged: if (hovered) root.focusSection = "search"
-            Keys.onPressed: function(event) {
-              if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_N) {
-                root.openAddView()
-                event.accepted = true
-              } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_U) {
-                root.copyAccountSelected()
-                event.accepted = true
-              } else if (event.key === Qt.Key_Escape) {
-                root.handleEscape()
-                event.accepted = true
-              } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                root.handleEnter(event)
-                event.accepted = true
-              } else if (event.key === Qt.Key_Down) {
-                if (root.visibleRecords.length > 0) {
-                  root.selectRow(1)
-                  root.focusSection = "list"
-                  keyCatcher.forceActiveFocus()
-                }
-                event.accepted = true
-              } else if (event.key === Qt.Key_Up) {
-                if (root.visibleRecords.length > 0) {
-                  root.selectRow(-1)
-                  keyCatcher.forceActiveFocus()
-                } else if (root.folderChipIds.length > 0) {
-                  root.focusSection = "folders"
-                  keyCatcher.forceActiveFocus()
-                }
-                event.accepted = true
-              }
-            }
-          }
-
-          PanelActionButton {
-            iconText: "󰐕"
-            tooltipText: "Add login"
-            foreground: root.foreground
-            fontFamily: contentFontFamily
-            onClicked: root.openAddView()
-          }
-
-          PanelActionButton {
-            iconText: root.centerPanel ? "󰉣" : "󰉠"
-            tooltipText: root.centerPanel ? "Open under the icon (Ctrl+P)" : "Open centered on the bar (Ctrl+P)"
-            foreground: root.foreground
-            fontFamily: contentFontFamily
-            onClicked: root.togglePanelPosition()
-          }
-        }
-
-        Row {
-          id: folderRow
-          visible: root.view === "list" && vault.records.length > 0
-          width: parent.width
-          spacing: Style.space(6)
-
-          Repeater {
-            model: root.folderChipIds
-
-            Button {
-              required property var modelData
-              required property int index
-              text: modelData.name
-              fontSize: Style.font.bodySmall
-              foreground: root.foreground
-              fontFamily: contentFontFamily
-              bordered: true
-              active: root.folderFilter === modelData.id
-              hasCursor: root.focusSection === "folders" && root.folderIndex === index
-              onClicked: root.setFolderFilter(modelData.id)
-              onHovered: function(h) {
-                if (h) {
-                  root.focusSection = "folders"
-                  root.folderIndex = index
-                }
-              }
-            }
-          }
-        }
-
-        Text {
-          width: parent.width
-          visible: copiedFlash || savedFlash
-          horizontalAlignment: Text.AlignHCenter
-          text: savedFlash ? "Saved" : copyFlashText
-          color: root.dim
-          font.family: contentFontFamily
-          font.pixelSize: Style.font.caption
-        }
-
-        Column {
-          id: addForm
-          width: parent.width
-          spacing: Style.space(8)
-          visible: root.view === "add"
-          Row {
-            id: addKindRow
-            width: parent.width
-            spacing: Style.space(6)
-
-            Button {
-              text: "Account"
-              fontSize: Style.font.bodySmall
-              foreground: root.foreground
-              fontFamily: contentFontFamily
-              bordered: true
-              hasCursor: root.focusSection === "addKind" && root.addKind === "account"
-              onClicked: root.addKind = "account"
-            }
-
-            Button {
-              text: "Nostr"
-              fontSize: Style.font.bodySmall
-              foreground: root.foreground
-              fontFamily: contentFontFamily
-              bordered: true
-              hasCursor: root.focusSection === "addKind" && root.addKind === "nostr"
-              onClicked: root.addKind = "nostr"
-            }
-          }
-
-          TextField {
-            id: folderField
-            width: parent.width
-            placeholderText: "Folder"
-            text: root.addFolder
-            foreground: root.foreground
-            onTextChanged: root.addFolder = text
-            onActiveFocusChanged: if (activeFocus) root.focusSection = "addFields"
-            Keys.onPressed: function(event) {
-              if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_G) {
-                if (root.addKind === "nostr") root.generateNostrKey()
-                else root.generateAddPassword()
-                event.accepted = true
-              } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_1) {
-                root.addKind = "account"
-                event.accepted = true
-              } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_2) {
-                root.addKind = "nostr"
-                event.accepted = true
-              } else if (event.key === Qt.Key_Tab) {
-                if (event.modifiers & Qt.ShiftModifier) {
-                  root.focusSection = "addKind"
-                  keyCatcher.forceActiveFocus()
-                } else {
-                  accountField.forceActiveFocus()
-                }
-                event.accepted = true
-              } else if (event.key === Qt.Key_Escape) {
-                root.cancelAdd()
-                event.accepted = true
-              }
-            }
-          }
-
-          TextField {
-            id: accountField
-            width: parent.width
-            placeholderText: root.addKind === "nostr" ? "Nickname" : "Account or nickname"
-            text: root.addAccount
-            font.family: contentFontFamily
-            onTextChanged: root.addAccount = text
-            onActiveFocusChanged: if (activeFocus) root.focusSection = "addFields"
-            Keys.onPressed: function(event) {
-              if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_G) {
-                if (root.addKind === "nostr") root.generateNostrKey()
-                else root.generateAddPassword()
-                event.accepted = true
-              } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_1) {
-                root.addKind = "account"
-                event.accepted = true
-              } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_2) {
-                root.addKind = "nostr"
-                event.accepted = true
-              } else if (event.key === Qt.Key_Tab) {
-                if (event.modifiers & Qt.ShiftModifier)
-                  folderField.forceActiveFocus()
-                else if (root.addKind === "account")
-                  passwordField.forceActiveFocus()
-                event.accepted = true
-              } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                if (root.addKind === "nostr") {
-                  root.generateNostrKey()
-                  event.accepted = true
-                }
-              } else if (event.key === Qt.Key_Escape) {
-                root.cancelAdd()
-                event.accepted = true
-              }
-            }
-          }
-
-          RowLayout {
-            width: parent.width
-            spacing: Style.space(6)
-            visible: root.addKind === "account"
-
-            TextField {
-              id: passwordField
-              Layout.fillWidth: true
-              placeholderText: "Password"
-              password: !root.addPasswordVisible
-              text: root.addPassword
-              font.family: contentFontFamily
-              onTextChanged: root.addPassword = text
-              onActiveFocusChanged: if (activeFocus) root.focusSection = "addFields"
-              Keys.onPressed: function(event) {
-                if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_G) {
-                  root.generateAddPassword()
-                  event.accepted = true
-                } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_E) {
-                  root.addPasswordVisible = !root.addPasswordVisible
-                  event.accepted = true
-                } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_1) {
-                  root.addKind = "account"
-                  event.accepted = true
-                } else if ((event.modifiers & Qt.ControlModifier) && event.key === Qt.Key_2) {
-                  root.addKind = "nostr"
-                  event.accepted = true
-                } else if (event.key === Qt.Key_Tab && (event.modifiers & Qt.ShiftModifier)) {
-                  accountField.forceActiveFocus()
-                  event.accepted = true
-                } else if (event.key === Qt.Key_Escape) {
-                  root.cancelAdd()
-                  event.accepted = true
-                } else if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter) {
-                  root.saveAdd()
-                  event.accepted = true
-                }
-              }
-            }
-
-            PanelActionButton {
-              iconText: root.addPasswordVisible ? "󰈉" : "󰈈"
-              tooltipText: root.addPasswordVisible ? "Hide password" : "Show password"
-              foreground: root.foreground
-              fontFamily: contentFontFamily
-              onClicked: root.addPasswordVisible = !root.addPasswordVisible
-            }
-
-            PanelActionButton {
-              iconText: "󰑐"
-              tooltipText: "Generate password"
-              foreground: root.foreground
-              fontFamily: contentFontFamily
-              onClicked: root.generateAddPassword()
-            }
-          }
-
-          Row {
-            width: parent.width
-            spacing: Style.space(8)
-
-            Button {
-              text: "Save"
-              visible: root.addKind === "account"
-              foreground: root.foreground
-              fontFamily: contentFontFamily
-              onClicked: root.saveAdd()
-            }
-
-            Button {
-              text: "Generate key"
-              visible: root.addKind === "nostr"
-              foreground: root.foreground
-              fontFamily: contentFontFamily
-              onClicked: root.generateNostrKey()
-            }
-
-            Button {
-              text: "Cancel"
-              foreground: root.foreground
-              fontFamily: contentFontFamily
-              onClicked: root.cancelAdd()
-            }
-          }
-
-          Text {
-            width: parent.width
-            visible: root.addError !== ""
-            wrapMode: Text.WordWrap
-            text: root.addError
-            color: Qt.rgba(1, 0.45, 0.45, 0.95)
-            font.family: contentFontFamily
-            font.pixelSize: Style.font.caption
-          }
-        }
+      LoginListView {
+        id: listView
+        panel: root
       }
 
-      Item {
-        id: listArea
-        anchors.top: topChrome.bottom
-        anchors.left: parent.left
-        anchors.right: parent.right
-        anchors.bottom: parent.bottom
-        anchors.topMargin: Style.space(8)
-        visible: root.view === "list"
-
-        Item {
-          id: emptyState
-          anchors.fill: parent
-          visible: root.visibleRecords.length === 0
-
-          MouseArea {
-            anchors.fill: parent
-            cursorShape: Qt.PointingHandCursor
-            onClicked: root.openAddView()
-          }
-
-          Column {
-            anchors.centerIn: parent
-            width: parent.width
-            spacing: Style.space(4)
-
-            Text {
-              width: parent.width
-              text: vault.records.length === 0 ? "No logins yet" : "No matches"
-              color: root.dim
-              font.family: contentFontFamily
-              font.pixelSize: Style.font.body
-              horizontalAlignment: Text.AlignHCenter
-            }
-
-            Text {
-              width: parent.width
-              text: "Add login"
-              color: root.foreground
-              font.family: contentFontFamily
-              font.pixelSize: Style.font.body
-              font.underline: true
-              horizontalAlignment: Text.AlignHCenter
-            }
-
-            Text {
-              width: parent.width
-              text: "Ctrl+N or + to add"
-              color: root.dim
-              font.family: contentFontFamily
-              font.pixelSize: Style.font.caption
-              horizontalAlignment: Text.AlignHCenter
-            }
-          }
-        }
-
-        Flickable {
-          id: listFlick
-          anchors.fill: parent
-          visible: root.visibleRecords.length > 0
-          contentWidth: width
-          contentHeight: listColumn.implicitHeight
-          clip: true
-          boundsBehavior: Flickable.StopAtBounds
-          flickableDirection: Flickable.VerticalFlick
-          interactive: contentHeight > height
-          ScrollBar.vertical: ScrollBar { policy: ScrollBar.AsNeeded }
-
-          WheelHandler {
-            acceptedDevices: PointerDevice.Mouse | PointerDevice.TouchPad
-            onWheel: function(event) {
-              if (listFlick.contentHeight <= listFlick.height)
-                return
-              var maxY = listFlick.contentHeight - listFlick.height
-              listFlick.contentY = Math.max(0, Math.min(listFlick.contentY - event.angleDelta.y, maxY))
-              event.accepted = true
-            }
-          }
-
-          Column {
-            id: listColumn
-            width: listFlick.width
-            spacing: Style.space(10)
-
-            Column {
-              width: listColumn.width
-              spacing: Style.space(10)
-              visible: root.folderFilter === "all"
-
-              Repeater {
-                model: root.groups
-
-                Column {
-                  required property var modelData
-                  width: listColumn.width
-                  spacing: Style.space(4)
-
-                  PanelSectionHeader {
-                    width: parent.width
-                    text: modelData.name.toUpperCase() + " " + modelData.total
-                    foreground: root.foreground
-                    fontFamily: contentFontFamily
-                  }
-
-                  Repeater {
-                    model: modelData.records
-
-                    LoginRow {
-                      required property var modelData
-                      width: listColumn.width
-                      record: modelData
-                      rowIndex: root.indexOfRecord(modelData)
-                    }
-                  }
-                }
-              }
-            }
-
-            Column {
-              width: listColumn.width
-              spacing: Style.space(4)
-              visible: root.folderFilter !== "all"
-
-              Repeater {
-                model: root.filteredRecords
-
-                LoginRow {
-                  required property var modelData
-                  width: listColumn.width
-                  record: modelData
-                  rowIndex: root.indexOfRecord(modelData)
-                }
-              }
-            }
-          }
-        }
+      AddLoginForm {
+        id: addForm
+        panel: root
       }
+
+      FooterStrip { panel: root }
     }
 
-    ConfirmDialog {
+    ConfirmCard {
       id: confirmDialog
+      panel: root
       anchors.fill: parent
       z: 100
       opened: root.confirmOpen
       message: root.confirmMessage
+      detail: root.confirmDetail
       confirmText: root.confirmConfirmText
-      cancelText: "Cancel"
-      foreground: root.foreground
-      background: Color.popups.background
-      selectedText: root.selectedText
-
-      onOpenedChanged: {
-        if (opened)
-          Qt.callLater(function() { confirmDialog.forceActiveFocus() })
-      }
-
-      onCanceled: root.closeConfirm()
-      onConfirmed: root.handleConfirm()
-
-      Keys.priority: Keys.BeforeItem
-      Keys.onPressed: function(event) {
-        if (confirmDialog.handleKey(event))
-          event.accepted = true
-      }
-    }
-  }
-
-  component MenuRow: CursorSurface {
-    id: menuRow
-    signal chosen()
-    signal hovered()
-    property string label: ""
-    property bool selected: false
-
-    visible: enabled
-    foreground: root.foreground
-    hasCursor: selected
-    implicitHeight: Style.space(48)
-    radius: 0
-
-    MouseArea {
-      anchors.fill: parent
-      hoverEnabled: true
-      cursorShape: Qt.PointingHandCursor
-      onEntered: menuRow.hovered()
-      onClicked: menuRow.chosen()
-    }
-
-    Text {
-      anchors.fill: parent
-      anchors.leftMargin: Style.space(12)
-      anchors.rightMargin: Style.space(12)
-      verticalAlignment: Text.AlignVCenter
-      textFormat: Text.PlainText
-      text: menuRow.label
-      color: root.foreground
-      font.family: root.contentFontFamily
-      font.pixelSize: Style.font.body
-      elide: Text.ElideRight
-    }
-  }
-
-  component LoginRow: CursorSurface {
-    id: row
-    property var record: null
-    property int rowIndex: -1
-    property bool actionsMenuOpen: false
-    property int menuIndex: 0
-
-    readonly property bool selected: rowIndex === root.listIndex
-    readonly property var menuOptions: [
-      { id: "copyAccount", label: "Copy account" },
-      { id: "typePassword", label: "Type password" },
-      { id: "remove", label: "Remove" }
-    ]
-
-    hasCursor: root.focusSection === "list" && root.listIndex === rowIndex && rowIndex >= 0
-    current: selected
-    foreground: root.foreground
-    implicitHeight: root.rowHeight
-
-    function openActionsMenu() {
-      menuIndex = 0
-      actionsPopup.open()
-    }
-
-    function scrollIntoView() {
-      if (row.rowIndex !== root.listIndex) return
-      var pos = row.mapToItem(listColumn, 0, 0)
-      var viewTop = listFlick.contentY
-      var viewBottom = viewTop + listFlick.height
-      var itemTop = pos.y
-      var itemBottom = pos.y + row.height
-      if (itemTop < viewTop)
-        listFlick.contentY = Math.max(0, itemTop)
-      else if (itemBottom > viewBottom)
-        listFlick.contentY = Math.min(listFlick.contentHeight - listFlick.height, itemBottom - listFlick.height)
-    }
-
-    function moveMenuCursor(delta) {
-      if (menuOptions.length === 0) return
-      menuIndex = (menuIndex + delta + menuOptions.length) % menuOptions.length
-    }
-
-    function activateMenuOption() {
-      if (menuIndex < 0 || menuIndex >= menuOptions.length) return
-      runMenuAction(menuOptions[menuIndex].id)
-      actionsPopup.close()
-    }
-
-    function runMenuAction(actionId) {
-      if (!row.record) return
-      if (actionId === "copyAccount")
-        root.copyAccount(row.record)
-      else if (actionId === "typePassword")
-        root.typeRecord(row.record)
-      else if (actionId === "remove")
-        root.removeRecord(row.record)
-    }
-
-    HoverHandler {
-      cursorShape: Qt.PointingHandCursor
-      onHoveredChanged: if (hovered && row.rowIndex >= 0) root.setListCursor(row.rowIndex)
-    }
-
-    Connections {
-      target: root
-      function onListIndexChanged() {
-        if (row.rowIndex === root.listIndex)
-          Qt.callLater(row.scrollIntoView)
-      }
-      function onOpenOverflowForRow(idx) {
-        if (idx === row.rowIndex)
-          row.openActionsMenu()
-      }
-    }
-
-    RowLayout {
-      anchors.fill: parent
-      anchors.leftMargin: Style.space(6)
-      anchors.rightMargin: Style.space(6)
-      spacing: Style.space(8)
-
-      Item {
-        Layout.fillWidth: true
-        Layout.fillHeight: true
-
-        TapHandler {
-          acceptedButtons: Qt.LeftButton
-          gesturePolicy: TapHandler.ReleaseWithinBounds
-          onTapped: root.copyRecord(row.record)
-        }
-
-        Text {
-          anchors.fill: parent
-          verticalAlignment: Text.AlignVCenter
-          text: row.record ? row.record.account : ""
-          color: row.selected ? root.selectedText : root.foreground
-          font.family: root.contentFontFamily
-          font.pixelSize: Style.font.body
-          elide: Text.ElideRight
-        }
-      }
-
-      PanelActionButton {
-        id: copyButton
-        iconText: "󰆏"
-        tooltipText: "Copy password"
-        foreground: root.foreground
-        fontFamily: root.contentFontFamily
-        Layout.alignment: Qt.AlignVCenter
-        onClicked: root.copyRecord(row.record)
-      }
-
-      PanelActionButton {
-        id: moreButton
-        iconText: "󰇘"
-        tooltipText: "More"
-        foreground: root.foreground
-        fontFamily: root.contentFontFamily
-        Layout.alignment: Qt.AlignVCenter
-        onClicked: row.openActionsMenu()
-      }
-
-      Popup {
-        id: actionsPopup
-        x: moreButton.x + moreButton.width - width
-        y: moreButton.y + moreButton.height + Style.space(4)
-        width: Style.space(220)
-        padding: 0
-        modal: false
-        focus: true
-        closePolicy: Popup.CloseOnEscape | Popup.CloseOnPressOutside
-
-        function handleKey(event) {
-          if (event.key === Qt.Key_Escape) {
-            close()
-            event.accepted = true
-            return
-          }
-          if (event.key === Qt.Key_Down || event.text === "j") {
-            row.moveMenuCursor(1)
-            event.accepted = true
-            return
-          }
-          if (event.key === Qt.Key_Up || event.text === "k") {
-            row.moveMenuCursor(-1)
-            event.accepted = true
-            return
-          }
-          if (event.key === Qt.Key_Return || event.key === Qt.Key_Enter || event.key === Qt.Key_Space) {
-            row.activateMenuOption()
-            event.accepted = true
-          }
-        }
-
-        onOpenedChanged: {
-          row.actionsMenuOpen = opened
-          root.actionsMenuOpen = opened
-          if (opened) {
-            row.menuIndex = 0
-            Qt.callLater(function() { actionsPopupContent.forceActiveFocus() })
-          } else if (root.opened) {
-            Qt.callLater(function() { keyCatcher.forceActiveFocus() })
-          }
-        }
-
-        background: BorderSurface {
-          color: Color.background
-          borderSpec: Border.flat(root.dim, 1)
-          radius: Style.cornerRadius
-        }
-
-        contentItem: Column {
-          id: actionsPopupContent
-          width: parent.width
-          focus: true
-          Keys.priority: Keys.BeforeItem
-          Keys.onPressed: function(event) { actionsPopup.handleKey(event) }
-
-          Repeater {
-            model: row.menuOptions
-
-            MenuRow {
-              required property var modelData
-              required property int index
-              width: parent.width
-              label: String(modelData.label || "")
-              selected: row.menuIndex === index
-              onHovered: row.menuIndex = index
-              onChosen: {
-                row.runMenuAction(String(modelData.id || ""))
-                actionsPopup.close()
-              }
-            }
-          }
-        }
-      }
+      alertOnly: root.confirmAction === "alert"
     }
   }
 }

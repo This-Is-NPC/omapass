@@ -1,0 +1,86 @@
+#!/usr/bin/python3
+# Stand-in for bin/omapass-keyring in the QML tests. It never touches a
+# keyring: it records its argv (and stdin for store/copy-text) as JSON lines
+# in $OMAPASS_STUB_DIR/calls.jsonl and answers from $OMAPASS_STUB_DIR/config.json
+# (read on every call). Secrets here are dummy test values.
+import json
+import os
+import signal
+import sys
+import time
+
+d = os.environ["OMAPASS_STUB_DIR"]
+try:
+    with open(os.path.join(d, "config.json")) as f:
+        cfg = json.load(f)
+except FileNotFoundError:
+    cfg = {}
+
+cmd = sys.argv[1] if len(sys.argv) > 1 else ""
+entry = {"cmd": cmd, "argv": sys.argv[1:]}
+if cmd in ("store", "copy-text"):
+    entry["stdin"] = sys.stdin.read()
+elif "--item-stdin" in sys.argv:
+    # The item comes as JSON on stdin. Log it as stdin, and as the argv flags
+    # the CLI form would have had, so tests can name the item either way.
+    entry["stdin"] = sys.stdin.read()
+    entry["real_argv"] = sys.argv[1:]
+    item = json.loads(entry["stdin"])
+    flags = [f"--account={item['account']}"]
+    if "kind" in item:
+        flags.append(f"--kind={item['kind']}")
+    if "folder" in item:
+        flags.append(f"--folder={item['folder']}")
+    if "compositor" in item:
+        flags.append(f"--compositor={item['compositor']}")
+    if "expect_id" in item:
+        flags.append(f"--expect-id={item['expect_id']}")
+    entry["argv"] = [cmd] + flags
+
+
+def log(e):
+    with open(os.path.join(d, "calls.jsonl"), "a") as f:
+        f.write(json.dumps(e) + "\n")
+
+
+log(entry)
+# Per command: cfg["delay"][cmd] seconds, then cfg["stderr"][cmd], then
+# cfg["exit"][cmd] (default 0). store, type and generate-password also log an "exit" event; a
+# type cut short by SIGTERM logs "terminated" instead. "list" waits before it
+# prints (a slow first unlock); the others print first, then wait.
+def terminated(*_):
+    log({"cmd": cmd, "event": "terminated"})
+    os._exit(143)
+
+
+signal.signal(signal.SIGTERM, terminated)
+
+delay = cfg.get("delay", {}).get(cmd, 0)
+if cmd == "list":
+    time.sleep(delay)
+    delay = 0
+
+
+if cmd == "list" and "list_raw" in cfg:
+    # Exact stdout, to test how the panel handles odd output.
+    sys.stdout.write(cfg["list_raw"])
+elif cmd == "list":
+    print(json.dumps(cfg.get("records", [
+        {"account": "alice@example", "folder": "Work", "kind": ""},
+        {"account": "bob", "folder": "Home", "kind": ""},
+        {"account": "carol", "folder": "Home", "kind": ""},
+    ])))
+elif cmd == "focus-snapshot":
+    print('{"compositor":"hyprland","id":"0x1"}')
+elif cmd == "generate-nostr":
+    account = next((a[len("--account="):] for a in sys.argv if a.startswith("--account=")), "")
+    print(json.dumps({"ok": True, "account": account}))
+elif cmd == "generate-password":
+    print(cfg.get("generated", "Gen#Pass-0123456789abcdef"))
+time.sleep(delay)
+if cmd in ("store", "type", "generate-password"):
+    log({"cmd": cmd, "event": "exit"})
+msg = cfg.get("stderr", {}).get(cmd)
+if msg:
+    print(msg, file=sys.stderr)
+sys.exit(cfg.get("exit", {}).get(cmd, 0))

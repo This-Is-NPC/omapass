@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import argparse
-import importlib.util
+import collections
 import io
 import json
 import os
@@ -14,28 +14,14 @@ import textwrap
 import types
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
-from importlib.machinery import SourceFileLoader
 from pathlib import Path
 from typing import Any
 from unittest import mock
 
-ROOT = Path(__file__).resolve().parents[1]
-HELPER_PATH = ROOT / "bin" / "omapass-keyring"
+from tests.helper_loader import HELPER_PATH, ROOT, load_helper
+from tests.sandbox_env import sandbox_only
+
 PINNED_PYTHON = "/usr/bin/python3"
-
-
-def load_helper():
-    """Load omapass-keyring (dash filename) via importlib."""
-    if not HELPER_PATH.is_file():
-        raise FileNotFoundError(f"missing helper: {HELPER_PATH}")
-    loader = SourceFileLoader("omapass_keyring", str(HELPER_PATH))
-    spec = importlib.util.spec_from_loader("omapass_keyring", loader)
-    if spec is None:
-        raise ImportError(f"cannot load spec for {HELPER_PATH}")
-    mod = importlib.util.module_from_spec(spec)
-    sys.modules["omapass_keyring"] = mod
-    loader.exec_module(mod)
-    return mod
 
 
 class FakeBackend:
@@ -47,22 +33,33 @@ class FakeBackend:
         self.get_secret_calls: list[str] = []
         self.store_calls: list[tuple[str, str, str, str]] = []
         self.clear_calls: list[str] = []
+        self.folders: list[str | None] = []
 
     def list_items(self) -> list[dict[str, str]]:
         return list(self.items)
 
-    def get_secret(self, account: str) -> str:
+    def get_secret(self, account: str, kind: str = "", folder: str | None = None) -> str:
         self.get_secret_calls.append(account)
+        self.folders.append(folder)
         return self.secret
 
-    def store(self, account: str, folder: str, secret: str, kind: str = "") -> None:
+    def store(
+        self, account: str, folder: str, secret: str, kind: str = "", replace: bool = False
+    ) -> None:
+        if not replace and any(
+            i.get("account") == account and i.get("kind", "") == kind for i in self.items
+        ):
+            print(f"already exists: {account}", file=sys.stderr)
+            raise SystemExit(4)
         self.store_calls.append((account, folder, secret, kind))
 
-    def clear(self, account: str) -> None:
+    def clear(self, account: str, kind: str = "", folder: str | None = None) -> None:
         self.clear_calls.append(account)
+        self.folders.append(folder)
 
-    def exists(self, account: str) -> bool:
-        return any(i.get("account") == account for i in self.items)
+    def exists(self, account: str, kind: str = "", folder: str | None = None) -> bool:
+        self.folders.append(folder)
+        return any(i.get("account") == account and i.get("kind", "") == kind for i in self.items)
 
 
 def make_evil_dir(tmp: Path) -> Path:
@@ -128,7 +125,7 @@ def call_type_helper(
     """Exercise cmd_type with mocked focus and exec_abs."""
     wtype_inputs: list[str] = []
 
-    def fake_exec_abs(path, args, input=None, capture=False):
+    def fake_exec_abs(path, args, input=None, capture=False, **_kw):
         if path == mod.WTYPE:
             wtype_inputs.append(input or "")
             return types.SimpleNamespace(returncode=0)
@@ -141,6 +138,8 @@ def call_type_helper(
         account=account,
         compositor=compositor,
         expect_id=expect_id,
+        kind="",
+        folder=None,
         rest=[],
     )
 
@@ -157,6 +156,8 @@ def call_type_helper(
 
     with (
         mock.patch.object(mod, "wait_for_focus", return_value=True),
+        mock.patch.object(mod, "read_layers", return_value=collections.Counter()),
+        mock.patch.object(mod, "session_locked", return_value=False),
         mock.patch.object(mod, "read_focus_for", side_effect=read_focus_side_effect),
         mock.patch.object(mod, "exec_abs", side_effect=fake_exec_abs),
     ):
@@ -182,6 +183,15 @@ class TestHelperSecurity(unittest.TestCase):
 
     def setUp(self) -> None:
         self.mod.BACKEND = None
+        # The helper refuses to copy without a tmpfs runtime dir; keep tests
+        # independent of the environment they run in.
+        env = mock.patch.dict(os.environ, {"XDG_RUNTIME_DIR": "/run/user/1000"})
+        env.start()
+        self.addCleanup(env.stop)
+        self.real_runtime_dir_problem = self.mod.runtime_dir_problem
+        check = mock.patch.object(self.mod, "runtime_dir_problem", return_value=None)
+        check.start()
+        self.addCleanup(check.stop)
 
     def test_list_never_calls_get_secret(self) -> None:
         backend = FakeBackend(
@@ -203,45 +213,31 @@ class TestHelperSecurity(unittest.TestCase):
         self.assertEqual(data[0]["account"], "a1")
         self.assertNotIn("secret", stdout.lower())
 
-    def test_copy_uses_pinned_wl_copy_not_path(self) -> None:
-        with tempfile.TemporaryDirectory() as tmpdir:
+    def test_serve_uses_pinned_wl_copy_not_path(self) -> None:
+        # Under $HOME: the sandbox's /tmp is noexec and the recorder really runs.
+        with tempfile.TemporaryDirectory(dir=Path.home()) as tmpdir:
             tmp = Path(tmpdir)
             evil = make_evil_dir(tmp)
             recorder = make_recorder_script(tmp / "fake-wl-copy")
             pwned = tmp / "pwned"
-
-            backend = FakeBackend(secret="clip-secret")
-            self.mod.BACKEND = backend
-            self.mod.WL_COPY = str(recorder)
-            exec_calls: list[tuple[Any, list[str], Any, bool]] = []
-
-            def fake_exec_abs(path, args, input=None, capture=False):
-                exec_calls.append((path, list(args), input, capture))
-                if path == str(recorder):
-                    Path(f"{recorder}.stdin").write_text(input or "", encoding="utf-8")
-                    return types.SimpleNamespace(returncode=0)
-                return types.SimpleNamespace(returncode=1)
-
             old_path = os.environ.get("PATH", "")
             os.environ["PATH"] = f"{evil}:{old_path}"
             try:
                 with (
-                    mock.patch.object(self.mod, "exec_abs", side_effect=fake_exec_abs),
-                    mock.patch.object(self.mod, "spawn_clipboard_expire"),
+                    mock.patch.object(self.mod, "WL_COPY", str(recorder)),
+                    mock.patch.object(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"clip-secret"))),
                 ):
-                    code, stdout, _stderr = invoke_main(self.mod, ["copy", "--account", "acct"])
+                    code, stdout, stderr = invoke_main(self.mod, ["clipboard-serve"])
             finally:
                 os.environ["PATH"] = old_path
 
-            self.assertEqual(code, 0)
+            self.assertEqual(code, 0, stderr)
+            self.assertEqual(stdout, "ok\n")
             self.assertFalse(pwned.exists(), "PATH-poisoned wl-copy must not run")
             stdin_file = Path(f"{recorder}.stdin")
             self.assertTrue(stdin_file.exists(), "pinned WL_COPY must receive stdin")
             self.assertEqual(stdin_file.read_text(encoding="utf-8"), "clip-secret")
             self.assertNotIn("clip-secret", stdout)
-            wl_copy_calls = [call for call in exec_calls if call[0] == str(recorder)]
-            self.assertTrue(wl_copy_calls, "copy must invoke pinned wl-copy")
-            self.assertIn("--paste-once", wl_copy_calls[0][1])
 
     def test_type_wtypes_when_focus_stable(self) -> None:
         code, _stdout, stderr, wtype_stdin = call_type_helper(
@@ -251,7 +247,8 @@ class TestHelperSecurity(unittest.TestCase):
             focus_stable=True,
         )
         self.assertEqual(code, 0, stderr)
-        self.assertEqual(wtype_stdin, ["typed-secret"])
+        self.assertEqual("".join(wtype_stdin), "typed-secret")
+        self.assertGreater(len(wtype_stdin), 1, "secret must be typed in chunks")
 
     def test_type_aborts_when_focus_changes(self) -> None:
         code, _stdout, stderr, wtype_stdin = call_type_helper(
@@ -260,7 +257,7 @@ class TestHelperSecurity(unittest.TestCase):
             expect_id="0xaaa",
             focus_stable=False,
         )
-        self.assertEqual(code, 2, stderr)
+        self.assertEqual(code, self.mod.EXIT_FOCUS_CHANGED, stderr)
         self.assertEqual(wtype_stdin, [])
         self.assertIn("focus changed", stderr.lower())
 
@@ -272,14 +269,14 @@ class TestHelperSecurity(unittest.TestCase):
             focus_stable=True,
             focus_unavailable=True,
         )
-        self.assertEqual(code, 2, stderr)
+        self.assertEqual(code, self.mod.EXIT_FOCUS_CHANGED, stderr)
         self.assertEqual(wtype_stdin, [])
         self.assertIn("unavailable", stderr.lower())
 
     def test_type_qml_expect_id_not_resnapshot(self) -> None:
         wtype_inputs: list[str] = []
 
-        def fake_exec_abs(path, args, input=None, capture=False):
+        def fake_exec_abs(path, args, input=None, capture=False, **_kw):
             if path == self.mod.WTYPE:
                 wtype_inputs.append(input or "")
                 return types.SimpleNamespace(returncode=0)
@@ -290,6 +287,8 @@ class TestHelperSecurity(unittest.TestCase):
 
         with (
             mock.patch.object(self.mod, "wait_for_focus", return_value=True),
+            mock.patch.object(self.mod, "read_layers", return_value=collections.Counter()),
+            mock.patch.object(self.mod, "session_locked", return_value=False),
             mock.patch.object(
                 self.mod,
                 "read_focus_for",
@@ -316,12 +315,12 @@ class TestHelperSecurity(unittest.TestCase):
             )
 
         self.assertEqual(code, 0, stderr)
-        self.assertEqual(wtype_inputs, ["typed-secret"])
+        self.assertEqual("".join(wtype_inputs), "typed-secret")
 
     def test_type_positional_account_cli(self) -> None:
         wtype_inputs: list[str] = []
 
-        def fake_exec_abs(path, args, input=None, capture=False):
+        def fake_exec_abs(path, args, input=None, capture=False, **_kw):
             if path == self.mod.WTYPE:
                 wtype_inputs.append(input or "")
                 return types.SimpleNamespace(returncode=0)
@@ -332,6 +331,8 @@ class TestHelperSecurity(unittest.TestCase):
 
         with (
             mock.patch.object(self.mod, "wait_for_focus", return_value=True),
+            mock.patch.object(self.mod, "read_layers", return_value=collections.Counter()),
+            mock.patch.object(self.mod, "session_locked", return_value=False),
             mock.patch.object(
                 self.mod,
                 "read_focus_for",
@@ -347,48 +348,248 @@ class TestHelperSecurity(unittest.TestCase):
             code, _stdout, stderr = invoke_main(self.mod, ["type", "--", "acct"])
 
         self.assertEqual(code, 0, stderr)
-        self.assertEqual(wtype_inputs, ["typed-secret"])
+        self.assertEqual("".join(wtype_inputs), "typed-secret")
 
-    def test_clipboard_expire_clears_only_if_unchanged(self) -> None:
-        if not hasattr(self.mod, "cmd_clipboard_expire"):
-            self.skipTest("clipboard-expire not implemented yet")
-        if not hasattr(self.mod, "WL_PASTE"):
-            self.skipTest("helper missing WL_PASTE")
+    def test_type_aborts_mid_typing_when_focus_changes(self) -> None:
+        typed: list[str] = []
+        focus = {"id": "0xaaa"}
 
-        secret = "clip-secret"
-        cases = (
-            ("matches", secret, True),
-            ("differs", "other-content", False),
+        def fake_exec_abs(path, args, input=None, capture=False, **_kw):
+            if path == self.mod.WTYPE:
+                typed.append(input or "")
+                if len(typed) == 2:  # focus moves while typing
+                    focus["id"] = "OTHER"
+                return types.SimpleNamespace(returncode=0)
+            return types.SimpleNamespace(returncode=1)
+
+        secret = "0123456789abcdefghij"
+        self.mod.BACKEND = FakeBackend(secret=secret)
+        with (
+            mock.patch.object(self.mod, "wait_for_focus", return_value=True),
+            mock.patch.object(self.mod, "read_layers", return_value=collections.Counter()),
+            mock.patch.object(self.mod, "session_locked", return_value=False),
+            mock.patch.object(
+                self.mod,
+                "read_focus_for",
+                side_effect=lambda c: {"compositor": c, "id": focus["id"]},
+            ),
+            mock.patch.object(self.mod, "exec_abs", side_effect=fake_exec_abs),
+        ):
+            code, _out, stderr = invoke_main(
+                self.mod,
+                ["type", "--account", "acct", "--compositor", "hyprland", "--expect-id", "0xaaa"],
+            )
+        self.assertEqual(code, self.mod.EXIT_FOCUS_CHANGED, stderr)
+        self.assertIn("focus changed", stderr.lower())
+        self.assertLess(len("".join(typed)), len(secret))
+        self.assertLessEqual(len(typed), 2)
+
+    def _type_with_layers(self, layer_json, secret, focus_ids=None, niri=False):
+        """Run cmd_type with hyprctl/niri output served per call; return (code, err, typed)."""
+        typed: list[str] = []
+        layer_calls = {"n": 0}
+        comp = "niri" if niri else "hyprland"
+
+        def fake_exec_abs(path, args, input=None, capture=False, **_kw):
+            if path == self.mod.WTYPE:
+                typed.append(input or "")
+                return types.SimpleNamespace(returncode=0)
+            layer_calls["n"] += 1
+            return types.SimpleNamespace(
+                returncode=0, stdout=layer_json(len(typed)), stderr=""
+            )
+
+        self.mod.BACKEND = FakeBackend(secret=secret)
+        with (
+            mock.patch.object(self.mod, "wait_for_focus", return_value=True),
+            mock.patch.object(self.mod, "session_locked", return_value=False),
+            mock.patch.object(
+                self.mod,
+                "read_focus_for",
+                side_effect=lambda c: {
+                    "compositor": c,
+                    "id": (focus_ids or (lambda n: "0xaaa"))(len(typed)),
+                },
+            ),
+            mock.patch.object(self.mod, "exec_abs", side_effect=fake_exec_abs),
+        ):
+            code, _out, stderr = invoke_main(
+                self.mod,
+                ["type", "--account", "acct", "--compositor", comp, "--expect-id", "0xaaa"],
+            )
+        return code, stderr, typed
+
+    @staticmethod
+    def _hypr_layers(addresses):
+        return json.dumps(
+            {"eDP-1": {"levels": {"2": [{"address": a, "namespace": "x"} for a in addresses]}}}
         )
-        for label, paste_text, should_clear in cases:
-            with self.subTest(case=label):
-                exec_calls: list[tuple[Any, list[str], Any, bool]] = []
 
-                def fake_exec_abs(path, args, input=None, capture=False):
-                    exec_calls.append((path, list(args), input, capture))
-                    if path == self.mod.WL_PASTE:
-                        return types.SimpleNamespace(returncode=0, stdout=paste_text)
-                    return types.SimpleNamespace(returncode=0)
+    def test_type_one_character_per_wtype_call(self) -> None:
+        self.assertEqual(self.mod.TYPE_CHUNK, 1)
+        code, err, typed = self._type_with_layers(
+            lambda n: self._hypr_layers(["0x1"]), "ab'\"~é"
+        )
+        self.assertEqual(code, 0, err)
+        self.assertEqual(typed, list("ab'\"~é"))
 
-                with (
-                    mock.patch.object(self.mod, "exec_abs", side_effect=fake_exec_abs),
-                    mock.patch.object(self.mod.time, "sleep"),
-                    mock.patch("sys.stdin", io.StringIO(secret)),
-                ):
-                    try:
-                        self.mod.cmd_clipboard_expire(argparse.Namespace(delay=0))
-                    except SystemExit as exc:
-                        self.fail(f"clipboard-expire raised unexpectedly: {exc}")
+    def test_type_aborts_when_layer_opens_mid_typing(self) -> None:
+        # A launcher layer appears after two characters were typed.
+        code, err, typed = self._type_with_layers(
+            lambda n: self._hypr_layers(["0x1"] if n < 2 else ["0x1", "0x2"]),
+            "0123456789",
+        )
+        self.assertEqual(code, self.mod.EXIT_FOCUS_CHANGED, err)
+        self.assertEqual(typed, ["0", "1"])
+        self.assertIn("focus changed", err.lower())
 
-                clear_calls = [
-                    call
-                    for call in exec_calls
-                    if call[0] == self.mod.WL_COPY and "--clear" in call[1]
-                ]
-                if should_clear:
-                    self.assertEqual(len(clear_calls), 1)
-                else:
-                    self.assertEqual(clear_calls, [])
+    def test_type_aborts_when_a_layer_closes(self) -> None:
+        # Any change of the baseline stops typing: a surface that held the
+        # keyboard may have just given it to something else (A1).
+        code, err, typed = self._type_with_layers(
+            lambda n: self._hypr_layers(["0x1", "0x2"] if n < 2 else ["0x1"]), "abcd"
+        )
+        self.assertEqual(code, self.mod.EXIT_FOCUS_CHANGED, err)
+        self.assertEqual(typed, ["a", "b"])
+
+    def test_type_aborts_when_focus_snapshot_changes_mid_typing(self) -> None:
+        code, err, typed = self._type_with_layers(
+            lambda n: self._hypr_layers(["0x1"]),
+            "0123456789",
+            focus_ids=lambda n: "0xaaa" if n < 3 else "0xbbb",
+        )
+        self.assertEqual(code, self.mod.EXIT_FOCUS_CHANGED, err)
+        self.assertEqual(typed, ["0", "1", "2"])
+
+    def test_type_aborts_when_layers_unreadable(self) -> None:
+        code, err, typed = self._type_with_layers(lambda n: "not json", "abc")
+        self.assertEqual(code, self.mod.EXIT_FOCUS_CHANGED, err)
+        self.assertEqual(typed, [])
+
+    def test_niri_only_keyboard_layers_count(self) -> None:
+        def layers(n):
+            extra = [{"namespace": "launcher", "layer": "Overlay", "keyboard_interactivity": "exclusive"}]
+            base = [{"namespace": "bar", "layer": "Top", "keyboard_interactivity": "none"}]
+            return json.dumps(base + (extra if n >= 1 else []))
+
+        code, err, typed = self._type_with_layers(layers, "abcd", niri=True)
+        self.assertEqual(code, self.mod.EXIT_FOCUS_CHANGED, err)
+        self.assertEqual(typed, ["a"])
+
+        code, err, typed = self._type_with_layers(
+            lambda n: json.dumps([{"namespace": "bar", "layer": "Top", "keyboard_interactivity": "none"}]),
+            "abcd",
+            niri=True,
+        )
+        self.assertEqual(code, 0, err)
+
+    def test_type_chunks_reassemble_secret(self) -> None:
+        typed: list[str] = []
+
+        def fake_exec_abs(path, args, input=None, capture=False, **_kw):
+            if path != self.mod.WTYPE:  # the session lock query
+                return types.SimpleNamespace(returncode=1)
+            typed.append(input or "")
+            return types.SimpleNamespace(returncode=0)
+
+        secret = "pä$$w0rd ünï-çødé-0123456789"
+        self.mod.BACKEND = FakeBackend(secret=secret)
+        with (
+            mock.patch.object(self.mod, "wait_for_focus", return_value=True),
+            mock.patch.object(self.mod, "read_layers", return_value=collections.Counter()),
+            mock.patch.object(self.mod, "session_locked", return_value=False),
+            mock.patch.object(
+                self.mod, "read_focus_for", return_value={"compositor": "hyprland", "id": "0xaaa"}
+            ),
+            mock.patch.object(self.mod, "exec_abs", side_effect=fake_exec_abs),
+        ):
+            code, _out, stderr = invoke_main(
+                self.mod,
+                ["type", "--account", "acct", "--compositor", "hyprland", "--expect-id", "0xaaa"],
+            )
+        self.assertEqual(code, 0, stderr)
+        self.assertEqual("".join(typed), secret)
+        self.assertGreater(len(typed), 1)
+
+    def test_show_nsec_refuses_non_tty_stdout(self) -> None:
+        self.mod.BACKEND = FakeBackend(secret="nsec1secret")
+        with (
+            mock.patch.object(sys.stdin, "isatty", return_value=True, create=True),
+            mock.patch("builtins.input", return_value="yes"),
+        ):
+            code, stdout, stderr = invoke_main(
+                self.mod, ["nostr", "show-nsec"], tty_stdout=False
+            )
+        self.assertNotEqual(code, 0)
+        self.assertNotIn("nsec1secret", stdout + stderr)
+        self.assertEqual(self.mod.BACKEND.get_secret_calls, [])
+
+    def test_show_nsec_prints_on_tty(self) -> None:
+        self.mod.BACKEND = FakeBackend(secret="nsec1secret")
+        with (
+            mock.patch.object(sys.stdin, "isatty", return_value=True, create=True),
+            mock.patch("builtins.input", return_value="yes"),
+        ):
+            code, stdout, stderr = invoke_main(
+                self.mod, ["nostr", "show-nsec"], tty_stdout=True
+            )
+        self.assertEqual(code, 0, stderr)
+        self.assertIn("nsec1secret", stdout)
+
+    def _serve_loop(self, events, *, ttl=30.0, wl_copy_exit=None):
+        """Run clipboard-serve's wait on a fake clock.
+
+        events: (time, "exit") when wl-copy exits by itself, i.e. another
+        client took the selection. Returns (end time, proc).
+        """
+        clock = [0.0]
+        pending = list(events)
+        proc = mock.MagicMock(pid=7)
+        proc.poll.return_value = wl_copy_exit
+
+        def fake_select(_r, _w, _x, timeout):
+            if pending and pending[0][0] - clock[0] <= timeout:
+                clock[0] = pending.pop(0)[0]
+                return ([100], [], [])
+            clock[0] += timeout
+            return ([], [], [])
+
+        with (
+            mock.patch.object(self.mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(self.mod.os, "pidfd_open", return_value=100),
+            mock.patch.object(self.mod.os, "close"),
+            mock.patch.object(self.mod.select, "select", side_effect=fake_select),
+            mock.patch.object(self.mod.time, "monotonic", side_effect=lambda: clock[0]),
+            mock.patch.object(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"s"))),
+        ):
+            code, out, err = invoke_main(
+                self.mod, ["clipboard-serve", "--ttl", str(ttl)]
+            )
+        self.assertEqual((code, out), (0, "ok\n"), err)
+        proc.terminate.assert_called_once_with()
+        return clock[0], proc
+
+    def test_serve_keeps_the_secret_until_the_ttl(self) -> None:
+        # Pastes are not watched: nothing but the TTL ends an unreplaced copy.
+        end, _proc = self._serve_loop([], ttl=12.0)
+        self.assertEqual(end, 12.0)
+
+    def test_serve_ends_when_another_copy_replaces_the_selection(self) -> None:
+        end, _proc = self._serve_loop([(2.0, "exit")])
+        self.assertEqual(end, 2.0)
+
+    def test_serve_reports_failure_when_wl_copy_fails(self) -> None:
+        proc = mock.MagicMock(pid=7)
+        proc.poll.return_value = 1
+        with (
+            mock.patch.object(self.mod.subprocess, "Popen", return_value=proc),
+            mock.patch.object(self.mod.os, "pidfd_open", return_value=100),
+            mock.patch.object(self.mod.os, "close"),
+            mock.patch.object(self.mod.select, "select", return_value=([100], [], [])),
+            mock.patch.object(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(b"s"))),
+        ):
+            code, out, _err = invoke_main(self.mod, ["clipboard-serve"])
+        self.assertEqual((code, out), (0, "fail\n"))
 
     def test_get_refuses_tty_without_yes(self) -> None:
         backend = FakeBackend(secret="must-not-print")
@@ -445,31 +646,100 @@ class TestHelperSecurity(unittest.TestCase):
         payload = json.loads(stdout)
         self.assertTrue(payload.get("ok"))
         self.assertEqual(payload.get("account"), "nostr:test")
-    def test_spawn_clipboard_expire_secret_on_stdin_not_argv(self) -> None:
-        fake_stdin = mock.MagicMock()
-        popen_calls: list[dict[str, Any]] = []
+    def _serve_popen(self, secret: bytes = b"clip-secret") -> dict[str, Any]:
+        """Run clipboard-serve with wl-copy mocked; returns wl-copy's Popen call."""
+        calls: list[dict[str, Any]] = []
+
+        def fake_popen(cmd, **kwargs):
+            calls.append({"cmd": list(cmd), **kwargs})
+            return mock.MagicMock(poll=lambda: 0, pid=1)
+
+        with (
+            mock.patch.object(self.mod.subprocess, "Popen", side_effect=fake_popen),
+            mock.patch.object(sys, "stdin", types.SimpleNamespace(buffer=io.BytesIO(secret))),
+        ):
+            code, _out, _err = invoke_main(self.mod, ["clipboard-serve"])
+        self.assertEqual(code, 0)
+        self.assertEqual(len(calls), 1)
+        return calls[0]
+
+    def test_serve_wl_copy_is_sensitive_typed_and_tmpfs(self) -> None:
+        call = self._serve_popen()
+        cmd = call["cmd"]
+        self.assertEqual(cmd[0], self.mod.WL_COPY)
+        self.assertIn("--foreground", cmd)
+        self.assertIn("--sensitive", cmd)
+        self.assertEqual(cmd[cmd.index("--type") + 1], "text/plain")
+        # Omarchy's history watcher would consume a paste-once offer.
+        self.assertNotIn("--paste-once", cmd)
+        self.assertEqual(call["env"].get("TMPDIR"), "/run/user/1000")
+        self.assertNotIn("clip-secret", " ".join(cmd))
+        self.assertNotIn("clip-secret", "".join(map(str, call["env"].values())))
+
+    def test_serve_wl_copy_dies_with_the_helper(self) -> None:
+        self.assertIs(self._serve_popen()["preexec_fn"], self.mod.die_with_parent)
+        libc = mock.Mock()
+        with mock.patch.object(self.mod.ctypes, "CDLL", return_value=libc):
+            self.mod.die_with_parent()
+        libc.prctl.assert_called_once_with(1, self.mod.signal.SIGTERM, 0, 0, 0)
+
+    def test_copy_refuses_without_private_runtime_dir(self) -> None:
+        self.mod.BACKEND = FakeBackend()
+        old_xdg = os.environ.pop("XDG_RUNTIME_DIR", None)
+        try:
+            with (
+                mock.patch.object(self.mod, "runtime_dir_problem", self.real_runtime_dir_problem),
+                mock.patch.object(self.mod.subprocess, "run") as run,
+            ):
+                code, _out, _err = invoke_main(self.mod, ["copy", "--account", "acct"])
+        finally:
+            if old_xdg is not None:
+                os.environ["XDG_RUNTIME_DIR"] = old_xdg
+        self.assertNotEqual(code, 0)
+        run.assert_not_called()
+
+    def _spawned(self, argv: list[str], stdin: str = "", status: bytes = b"ok\n"):
+        """Run a copy command with the helper spawn mocked; returns (code, err, calls, proc)."""
+        calls: list[dict[str, Any]] = []
+        proc = mock.MagicMock()
+        proc.stdout.readline.return_value = status
 
         def fake_popen(cmd: list[str], **kwargs: Any) -> mock.MagicMock:
-            popen_calls.append({"cmd": cmd, "kwargs": kwargs})
-            return mock.MagicMock(stdin=fake_stdin)
+            calls.append({"cmd": cmd, "kwargs": kwargs})
+            return proc
 
-        with mock.patch.object(self.mod.subprocess, "Popen", side_effect=fake_popen):
-            self.mod.spawn_clipboard_expire("clip-secret")
+        self.mod.BACKEND = FakeBackend(secret="clip-secret")
+        with (
+            mock.patch.object(self.mod.subprocess, "Popen", side_effect=fake_popen),
+            mock.patch.object(sys, "stdin", io.StringIO(stdin)),
+        ):
+            code, _out, err = invoke_main(self.mod, argv)
+        return code, err, calls, proc
 
-        self.assertEqual(len(popen_calls), 1)
-        argv = popen_calls[0]["cmd"]
-        self.assertEqual(argv[0], "/usr/bin/python3")
-        self.assertIn("clipboard-expire", argv)
-        self.assertIn("--delay", argv)
-        self.assertNotIn("clip-secret", " ".join(str(arg) for arg in argv))
-        fake_stdin.write.assert_called_once_with("clip-secret")
-        fake_stdin.close.assert_called_once_with()
+    def test_copy_spawns_serve_with_secret_on_stdin_not_argv(self) -> None:
+        for argv, stdin in ((["copy", "--account", "acct"], ""), (["copy-text"], "clip-secret")):
+            with self.subTest(argv=argv):
+                code, err, calls, proc = self._spawned(argv, stdin)
+                self.assertEqual(code, 0, err)
+                self.assertEqual(len(calls), 1)
+                cmd = calls[0]["cmd"]
+                self.assertEqual(cmd[:2], ["/usr/bin/python3", "-I"])
+                self.assertEqual(cmd[-1], "clipboard-serve")
+                self.assertNotIn("clip-secret", " ".join(cmd))
+                self.assertNotIn("clip-secret", "".join(map(str, calls[0]["kwargs"]["env"].values())))
+                self.assertTrue(calls[0]["kwargs"]["start_new_session"])
+                proc.stdin.write.assert_called_once_with(b"clip-secret")
+                proc.stdin.close.assert_called_once_with()
 
-
+    def test_copy_fails_unless_serve_reports_ok(self) -> None:
+        code, err, _calls, _proc = self._spawned(["copy", "--account", "acct"], status=b"")
+        self.assertNotEqual(code, 0)
+        self.assertIn("wl-copy failed", err)
 
 @unittest.skipUnless(HELPER_PATH.is_file(), "omapass-keyring not present yet")
+@sandbox_only
 class TestHelperPathPinningCli(unittest.TestCase):
-    """PATH poison via real /usr/bin/python3 subprocess (no GI required)."""
+    """PATH poison via real /usr/bin/python3 subprocess; lists the sandbox keyring."""
 
     def test_list_subprocess_ignores_path_poison(self) -> None:
         with tempfile.TemporaryDirectory() as tmpdir:
@@ -487,6 +757,44 @@ class TestHelperPathPinningCli(unittest.TestCase):
             )
             self.assertEqual(proc.returncode, 0, proc.stderr)
             self.assertNotIn("pwned", proc.stdout)
+
+
+class TestListKeyringErrors(unittest.TestCase):
+    """An unreadable keyring must fail, not look like an empty one."""
+
+    def _keyring(self, *, default, service_error=None):
+        mod = load_helper()
+        from gi.repository import GLib
+
+        secret = types.SimpleNamespace()
+        secret.SearchFlags = types.SimpleNamespace(ALL=1, LOAD_SECRETS=2, UNLOCK=4)
+        secret.ServiceFlags = types.SimpleNamespace(OPEN_SESSION=1)
+        secret.CollectionFlags = types.SimpleNamespace(NONE=0)
+        service = types.SimpleNamespace(search_sync=lambda *a: [])
+
+        def get_sync(*_a):
+            if service_error:
+                raise GLib.Error(service_error)
+            return service
+
+        secret.Service = types.SimpleNamespace(get_sync=get_sync)
+        secret.Collection = types.SimpleNamespace(for_alias_sync=lambda *a: default)
+        kr = mod.GiKeyring.__new__(mod.GiKeyring)
+        kr._Secret = secret
+        return kr
+
+    def test_no_default_collection_is_error(self) -> None:
+        with self.assertRaises(SystemExit) as ctx:
+            self._keyring(default=None).list_items()
+        self.assertNotEqual(ctx.exception.code, 0)
+
+    def test_service_failure_is_error(self) -> None:
+        with self.assertRaises(SystemExit) as ctx:
+            self._keyring(default=object(), service_error="bus down").list_items()
+        self.assertNotEqual(ctx.exception.code, 0)
+
+    def test_empty_keyring_is_not_error(self) -> None:
+        self.assertEqual(self._keyring(default=types.SimpleNamespace(search_sync=lambda *a: [])).list_items(), [])
 
 
 if __name__ == "__main__":

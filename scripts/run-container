@@ -1,0 +1,32 @@
+#!/bin/bash
+# Run one disposable test container that never outlives its client.
+#   scripts/run-container PREFIX IMAGE [docker run options...] [-- command...]
+# The container gets a unique name, --rm --init, and a run bound
+# (OMAPASS_RUN_TIMEOUT seconds, default 1500, 0 = none) that the image's
+# entrypoint enforces inside the container. A trap stops the container when
+# this script exits or is interrupted, so a killed `timeout` or a Ctrl-C
+# cannot leave quickshell or a keyring daemon spinning.
+set -euo pipefail
+prefix=$1 image=$2
+shift 2
+opts=()
+while [ $# -gt 0 ] && [ "$1" != "--" ]; do opts+=("$1"); shift; done
+[ "${1:-}" = "--" ] && shift
+
+name=$prefix-$$-$RANDOM
+cleanup() { docker rm -f "$name" >/dev/null 2>&1 || true; }
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
+
+tty=()
+[ -t 0 ] && [ -t 1 ] && tty=(-it)
+args=(run --rm --init --name "$name" "${tty[@]}"
+  -e "OMAPASS_RUN_TIMEOUT=${OMAPASS_RUN_TIMEOUT:-1500}" "${opts[@]}" "$image" "$@")
+if [ ${#tty[@]} -gt 0 ]; then
+  docker "${args[@]}"
+else
+  # In the background so a signal runs the trap at once, not after docker exits.
+  docker "${args[@]}" &
+  wait $! || exit $?
+fi

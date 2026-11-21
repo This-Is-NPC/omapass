@@ -1,0 +1,24 @@
+#!/bin/bash
+# Run omapass tests (or any command) against a disposable keyring in a container.
+#   scripts/test-sandbox                      # full suite
+#   scripts/test-sandbox bash                 # interactive shell
+#   scripts/test-sandbox python3 -I bin/omapass-keyring list --json
+# The repo is mounted read-only. Nothing from the host keyring or host D-Bus
+# is shared; each run starts from an empty keyring and is thrown away.
+set -euo pipefail
+SELF=$(/usr/bin/readlink -f -- "${BASH_SOURCE[0]}")
+HERE=${SELF%/*}
+ROOT=$(cd "$HERE/.." && pwd)
+
+# Tag by content of tests/sandbox/ so parallel checkouts never share an image.
+SUM=$(cd "$ROOT/tests/sandbox" && /usr/bin/sha256sum -- * | /usr/bin/sha256sum)
+IMAGE=omapass-keyring-sandbox:${SUM:0:12}
+
+docker build -q -t "$IMAGE" -f "$ROOT/tests/sandbox/Containerfile" "$ROOT/tests/sandbox" >/dev/null
+
+exec "$ROOT/scripts/run-container" omapass-sandbox "$IMAGE" \
+  --network none \
+  --tmpfs /tmp \
+  -e PYTHONDONTWRITEBYTECODE=1 \
+  -v "$ROOT:/src:ro" \
+  -- "$@"
