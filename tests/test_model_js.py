@@ -29,7 +29,7 @@ class TestModelReservedNames(unittest.TestCase):
     def test_reserved_names_group_and_list(self) -> None:
         self.assertIsNotNone(NODE, "node is required (installed in the sandbox image)")
         out = subprocess.run(
-            [NODE, "-e", SCRIPT, str(ROOT / "Model.js")],
+            [NODE, "-e", SCRIPT, str(ROOT / "qml" / "Model.js")],
             capture_output=True,
             text=True,
             check=True,
@@ -61,7 +61,7 @@ class TestModelKeepsKind(unittest.TestCase):
     def test_kind_survives_grouping_search_and_filter(self) -> None:
         self.assertIsNotNone(NODE, "node is required (installed in the sandbox image)")
         out = subprocess.run(
-            [NODE, "-e", KIND_SCRIPT, str(ROOT / "Model.js")],
+            [NODE, "-e", KIND_SCRIPT, str(ROOT / "qml" / "Model.js")],
             capture_output=True,
             text=True,
             check=True,
@@ -93,7 +93,7 @@ class TestFlattenGroups(unittest.TestCase):
     def test_flat_order_is_the_card_order(self) -> None:
         self.assertIsNotNone(NODE, "node is required (installed in the sandbox image)")
         out = subprocess.run(
-            [NODE, "-e", ORDER_SCRIPT, str(ROOT / "Model.js")],
+            [NODE, "-e", ORDER_SCRIPT, str(ROOT / "qml" / "Model.js")],
             capture_output=True,
             text=True,
             check=True,
@@ -121,7 +121,7 @@ class TestHyprBorder(unittest.TestCase):
     def test_parses_hyprctl_getoption_output(self) -> None:
         self.assertIsNotNone(NODE, "node is required (installed in the sandbox image)")
         out = subprocess.run(
-            [NODE, "-e", HYPR_SCRIPT, str(ROOT / "Model.js")],
+            [NODE, "-e", HYPR_SCRIPT, str(ROOT / "qml" / "Model.js")],
             capture_output=True,
             text=True,
             check=True,
@@ -151,7 +151,7 @@ class TestAllFoldersSentinel(unittest.TestCase):
     def test_folder_named_all_is_a_folder(self) -> None:
         self.assertIsNotNone(NODE, "node is required (installed in the sandbox image)")
         out = subprocess.run(
-            [NODE, "-e", FOLDER_SCRIPT, str(ROOT / "Model.js")],
+            [NODE, "-e", FOLDER_SCRIPT, str(ROOT / "qml" / "Model.js")],
             capture_output=True,
             text=True,
             check=True,
@@ -185,7 +185,7 @@ class TestModelIdentity(unittest.TestCase):
     def test_identity_and_duplicates(self) -> None:
         self.assertIsNotNone(NODE, "node is required (installed in the sandbox image)")
         out = subprocess.run(
-            [NODE, "-e", IDENTITY_SCRIPT, str(ROOT / "Model.js")],
+            [NODE, "-e", IDENTITY_SCRIPT, str(ROOT / "qml" / "Model.js")],
             capture_output=True,
             text=True,
             check=True,

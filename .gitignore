@@ -1,6 +1,2 @@
 __pycache__/
 *.py[cod]
-
-# Internal review notes; not part of the project.
-docs/security-review*.md
-docs/design-review.md

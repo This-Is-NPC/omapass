@@ -55,7 +55,7 @@ The image tag is a hash of `tests/sandbox/`, so the edit triggers a rebuild.
 
 ### QML runtime tests
 
-The panel (`Panel.qml` and the QML components it delegates to) is also tested running: `scripts/test-qml` stages every root `*.qml` file and starts the real panel
+The panel (`qml/Panel.qml` and the QML components it delegates to) is also tested running: `scripts/test-qml` stages `qml/` and the stub helper and starts the real panel
 in quickshell under a headless sway, sends keys with `wtype`, and checks the
 panel state and the helper commands it ran. It covers Enter and Shift+Enter,
 Space and single letters, the confirm dialog, the row menu, the masked
@@ -101,7 +101,7 @@ ends the container.
 - The sandbox's stock quickshell resolves `Color` to Qt 6.12's own `Color`
   type, unlike Omarchy's patched build. The tests import QtQuick at 6.11 in
   their staged copy of the QML to avoid that.
-- `scripts/test-qml --panel FILE` replaces only `Panel.qml` in the staged copy (the components stay as they are) and runs the tests against it,
+- `scripts/test-qml --panel FILE` replaces only `qml/Panel.qml` in the staged copy (the components stay as they are) and runs the tests against it,
   for example a copy with one behavior broken to check a test can fail.
 - Limits: sway stands in for Hyprland, so `hyprctl` is absent (the panel logs
   warnings and keeps its default border), and `wtype` types into the panel

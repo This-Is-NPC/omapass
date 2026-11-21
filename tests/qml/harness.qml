@@ -1,7 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import "plugin" as P
+import "plugin/qml" as P
 
 // Hosts the real Panel and exposes what a user would see, over IPC:
 //   quickshell ipc call harness state   -> JSON
@@ -20,7 +20,7 @@ ShellRoot {
   Loader {
     id: vaultHost
     active: false
-    source: "plugin/Vault.qml"
+    source: "plugin/qml/Vault.qml"
   }
 
   function eachItem(item, fn) {

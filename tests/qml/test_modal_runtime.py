@@ -320,8 +320,6 @@ class WidgetSession(Session):
     def _stage(self):
         super()._stage()
         shutil.copy(os.path.join(HERE, "harness_widget.qml"), os.path.join(self.dir, "shell.qml"))
-        shutil.copy(os.path.join(session.ROOT, "BarWidget.qml"),
-                    os.path.join(self.dir, "plugin", "BarWidget.qml"))
         # The shell's bar icon is not vendored: a stand-in with the same API.
         ui = os.path.join(self.dir, "Ui")
         with open(os.path.join(ui, "BarIconButton.qml"), "w") as f:

@@ -9,7 +9,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 PANEL_FILES = tuple(
-    ROOT / name
+    ROOT / "qml" / name
     for name in (
         "AddLoginForm.qml",
         "ConfirmCard.qml",
@@ -27,7 +27,7 @@ PANEL_FILES = tuple(
     )
 )
 
-QML_FILES = (ROOT / "Vault.qml", ROOT / "BarWidget.qml") + PANEL_FILES
+QML_FILES = (ROOT / "qml" / "Vault.qml", ROOT / "qml" / "BarWidget.qml") + PANEL_FILES
 
 HELPER = ROOT / "bin" / "omapass-keyring"
 HELPER_FILES = (HELPER, *sorted((ROOT / "bin" / "omapass_lib").glob("*.py")))
@@ -82,7 +82,7 @@ COMMAND_LITERAL = r"command\s*[:=]\s*\[\s*\"([^\"]*)\""
 
 class TestStaticGuards(unittest.TestCase):
     def test_list_failure_keeps_records_and_shows_error(self) -> None:
-        vault = read_text(ROOT / "Vault.qml")
+        vault = read_text(ROOT / "qml" / "Vault.qml")
         panel = panel_text()
         start = vault.index("id: listProc")
         block = vault[start : vault.index("Process {", start)]
@@ -134,7 +134,7 @@ class TestStaticGuards(unittest.TestCase):
                 )
 
     def test_vault_uses_pinned_python3(self) -> None:
-        path = ROOT / "Vault.qml"
+        path = ROOT / "qml" / "Vault.qml"
         if not path.exists():
             self.skipTest("Vault.qml missing")
         text = read_text(path)
@@ -191,7 +191,7 @@ class TestStaticGuards(unittest.TestCase):
         self.assertNotIn("clipboard-expire", text)
 
     def test_vault_generate_nostr_conditional_replace(self) -> None:
-        path = ROOT / "Vault.qml"
+        path = ROOT / "qml" / "Vault.qml"
         if not path.exists():
             self.skipTest("Vault.qml missing")
         body = extract_function_body(read_text(path), "generateNostr")
@@ -223,7 +223,7 @@ class TestStaticGuards(unittest.TestCase):
     def test_generated_password_collector_is_destroyed_after_each_run(self) -> None:
         # A collector keeps its text until the next run and cannot be cleared,
         # so each run gets its own, destroyed once the result is handled.
-        vault = read_text(ROOT / "Vault.qml")
+        vault = read_text(ROOT / "qml" / "Vault.qml")
         block = vault[vault.index("id: genPassProc"):]
         block = block[: block.index("id: genNostrProc")]
         self.assertNotIn("stdout: StdioCollector", block)
@@ -280,7 +280,7 @@ class TestStaticGuards(unittest.TestCase):
         self.assertNotIn("accountExists", gen_body)
 
     def test_copy_reports_helper_failure(self) -> None:
-        vault = read_text(ROOT / "Vault.qml")
+        vault = read_text(ROOT / "qml" / "Vault.qml")
         proc = re.search(r"id: copyProc\b.*?\n  }\n", vault, re.DOTALL)
         self.assertIsNotNone(proc, "copyProc not found")
         assert proc is not None
@@ -293,7 +293,7 @@ class TestStaticGuards(unittest.TestCase):
 
     def test_confirm_dialog_starts_on_cancel(self) -> None:
         panel = panel_text()
-        dialog = re.search(r"onOpenedChanged: \{(.*?)\n  \}", read_text(ROOT / "ConfirmCard.qml"), re.DOTALL)
+        dialog = re.search(r"onOpenedChanged: \{(.*?)\n  \}", read_text(ROOT / "qml" / "ConfirmCard.qml"), re.DOTALL)
         self.assertIsNotNone(dialog, "confirm dialog onOpenedChanged not found")
         assert dialog is not None
         self.assertIn("selectedIndex = 0", dialog.group(1))
@@ -392,10 +392,10 @@ class TestStaticGuards(unittest.TestCase):
     def test_all_folders_sentinel_cannot_match_a_real_folder(self) -> None:
         panel = panel_text()
         self.assertNotIn('"all"', panel)
-        self.assertIn('var ALL_FOLDERS = "\\u0001all"', read_text(ROOT / "Model.js"))
+        self.assertIn('var ALL_FOLDERS = "\\u0001all"', read_text(ROOT / "qml" / "Model.js"))
 
     def test_vault_store_passes_replace_only_when_asked(self) -> None:
-        body = extract_function_body(read_text(ROOT / "Vault.qml"), "store")
+        body = extract_function_body(read_text(ROOT / "qml" / "Vault.qml"), "store")
         self.assertIn("if (replace)", body)
         self.assertIn('cmd.push("--replace")', body)
 
@@ -411,7 +411,7 @@ class TestStaticGuards(unittest.TestCase):
                     )
 
     def test_reopening_panel_cancels_autotype(self) -> None:
-        vault = read_text(ROOT / "Vault.qml")
+        vault = read_text(ROOT / "qml" / "Vault.qml")
         cancel = extract_function_body(vault, "cancelType")
         self.assertIn("typeProc.running = false", cancel)
         self.assertIn("typeDoneCallback = null", cancel)
@@ -462,7 +462,7 @@ class TestStaticGuards(unittest.TestCase):
 
     def test_footer_is_fixed_and_shows_hints_or_status(self) -> None:
         panel = panel_text()
-        body = read_text(ROOT / "FooterStrip.qml")
+        body = read_text(ROOT / "qml" / "FooterStrip.qml")
         self.assertIn("height: footer.panel.footerHeight", body)
         self.assertIn("anchors.bottom: parent.bottom", body)
         self.assertIn("visible: !footer.panel.toastVisible", body)
@@ -577,7 +577,7 @@ class TestStaticGuards(unittest.TestCase):
         for token in ('addKind === "nostr"', "addAccount", "addFolder", "addPassword"):
             self.assertIn(token, can.group(1))
         self.assertIn("muted: !form.panel.canSubmitAdd", panel)
-        solid = read_text(ROOT / "SolidButton.qml")
+        solid = read_text(ROOT / "qml" / "SolidButton.qml")
         self.assertIn("opacity: muted ? 0.45 : 1", solid)
         # Muted stays clickable so the validation message can show.
         self.assertNotIn("enabled", solid)
@@ -624,7 +624,7 @@ class TestStaticGuards(unittest.TestCase):
 
     def test_row_name_is_not_split_with_a_spacer(self) -> None:
         panel = panel_text()
-        row = read_text(ROOT / "LoginRow.qml")
+        row = read_text(ROOT / "qml" / "LoginRow.qml")
         self.assertNotRegex(row, r"Item \{ Layout\.fillWidth: true \}")
         self.assertIn("id: nsecBadge", row)
         self.assertIn("Math.min(implicitWidth,", row)
@@ -664,13 +664,14 @@ class TestStaticGuards(unittest.TestCase):
 
     def test_confirm_dialog_wraps_a_long_unspaced_name(self) -> None:
         panel = panel_text()
-        dialog = re.search(r"Item \{\n  id: dialog\n(.*?)text: dialog\.message", read_text(ROOT / "ConfirmCard.qml"), re.DOTALL)
+        dialog = re.search(r"Item \{\n  id: dialog\n(.*?)text: dialog\.message", read_text(ROOT / "qml" / "ConfirmCard.qml"), re.DOTALL)
         assert dialog is not None
         self.assertIn("wrapMode: Text.WrapAnywhere", dialog.group(1).rsplit("Text {", 1)[1])
 
     def test_source_files_stay_small_and_guarded(self) -> None:
-        root_qml = sorted(ROOT.glob("*.qml"))
-        self.assertEqual(set(root_qml), set(QML_FILES), "every root QML file must be guarded")
+        self.assertEqual(sorted(ROOT.glob("*.qml")), [], "QML belongs in qml/")
+        root_qml = sorted((ROOT / "qml").glob("*.qml"))
+        self.assertEqual(set(root_qml), set(QML_FILES), "every QML file must be guarded")
         for path in (*root_qml, *HELPER_FILES):
             with self.subTest(path=path.name):
                 lines = len(read_text(path).splitlines())

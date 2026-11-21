@@ -1,7 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
-import "plugin" as P
+import "plugin/qml" as P
 
 // Hosts the real BarWidget (and so the Panel it loads) for the tests that
 // need the shell's side of the lifecycle: what the shell's toggle reads.

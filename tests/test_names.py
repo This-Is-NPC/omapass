@@ -60,8 +60,8 @@ class TestNames(unittest.TestCase):
 
     def test_panel_asks_to_replace_only_on_exit_exists(self) -> None:
         root = Path(__file__).resolve().parent.parent
-        panel = (root / "AddLoginForm.qml").read_text()
-        self.assertIn("readonly property int exitExists: 4", (root / "Vault.qml").read_text())
+        panel = (root / "qml" / "AddLoginForm.qml").read_text()
+        self.assertIn("readonly property int exitExists: 4", (root / "qml" / "Vault.qml").read_text())
         for fn in ("function saveAdd(", "function doGenerateNostr("):
             body = panel[panel.index(fn):]
             body = body[: body.index("\n  function ", 10)]

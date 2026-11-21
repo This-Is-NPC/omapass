@@ -64,13 +64,11 @@ class Session:
             shutil.copytree(os.path.join(HERE, "shell", name), os.path.join(self.dir, name))
         plugin = os.path.join(self.dir, "plugin")
         os.makedirs(os.path.join(plugin, "bin"))
-        # Every root QML file; OMAPASS_QML_PANEL replaces only Panel.qml.
-        for name in sorted(os.listdir(ROOT)):
-            if name.endswith(".qml") or name == "Model.js":
-                shutil.copy(os.path.join(ROOT, name), os.path.join(plugin, name))
+        # Mirror the repo: plugin/qml and plugin/bin. OMAPASS_QML_PANEL replaces only Panel.qml.
+        shutil.copytree(os.path.join(ROOT, "qml"), os.path.join(plugin, "qml"))
         panel = os.environ.get("OMAPASS_QML_PANEL")
         if panel:
-            shutil.copy(panel, os.path.join(plugin, "Panel.qml"))
+            shutil.copy(panel, os.path.join(plugin, "qml", "Panel.qml"))
         for stub, name in (("stub-helper", "omapass-keyring"), ("stub-notify", "notify-stub")):
             path = os.path.join(plugin, "bin", name)
             shutil.copy(os.path.join(HERE, stub), path)

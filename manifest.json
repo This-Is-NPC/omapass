@@ -7,7 +7,7 @@
   "license": "MIT",
   "description": "100% local. List, copy, and type logins from the native keyring.",
   "kinds": ["bar-widget"],
-  "entryPoints": { "barWidget": "BarWidget.qml" },
+  "entryPoints": { "barWidget": "qml/BarWidget.qml" },
   "barWidget": {
     "displayName": "Passwords",
     "description": "100% local. Search logins, Enter copies, Shift+Enter types",

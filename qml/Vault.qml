@@ -8,7 +8,7 @@ Item {
 
   readonly property string keyringService: "omapass"
   readonly property string helperPath: {
-    var u = Qt.resolvedUrl("bin/omapass-keyring")
+    var u = Qt.resolvedUrl("../bin/omapass-keyring")
     var s = String(u)
     if (s.indexOf("file://") === 0)
       s = s.substring(7)
