@@ -264,7 +264,9 @@ exit 12). The CLI flags still work without
 `Vault.qml` sends notifications through
 `/usr/share/omarchy/bin/omarchy-notification-send` (`-u critical --app-name
 omapass`), cut to 400 characters. The message is only ever the helper's error
-text.
+text. The Omarchy toast renders a subset of markup (`<b>`, `<i>`, `<a href>`,
+`<br>`) after decoding entities, so `Model.plainNotification` first inserts a
+space after any `<` or `&` that touches the next character.
 
 ### The clipboard-serve handshake
 

@@ -90,7 +90,7 @@ class TestStaticGuards(unittest.TestCase):
         self.assertIn("listError", vault)
         self.assertIn("vault.listError", panel)
 
-    def test_list_error_is_plain_text_and_blocks_add(self) -> None:
+    def test_list_error_is_shown_and_blocks_add(self) -> None:
         panel = panel_text()
         body = extract_function_body(panel, "openAddView")
         self.assertIn("vault.listError", body)
@@ -105,7 +105,6 @@ class TestStaticGuards(unittest.TestCase):
             block = panel[i:j]
             if re.search(r"\btext:[^\n]*(\n[^\n]*)?listError", block) and "listError" in block.split("text:", 1)[1].split("color:")[0]:
                 shown += 1
-                self.assertIn("textFormat: Text.PlainText", block)
         self.assertEqual(shown, 2)
         self.assertIn("showListError", panel)
 
@@ -422,21 +421,30 @@ class TestStaticGuards(unittest.TestCase):
         for snippet in ('command: ["ls"]', 'x.command = ["ls"]'):
             self.assertIsNotNone(re.search(COMMAND_LITERAL, snippet), snippet)
 
-    def test_panel_text_shows_plain_text_only(self) -> None:
-        text = panel_text()
-        untrusted = ("row.record", "panel.addError", "copyFlashText")
+    def test_every_text_is_plain_text(self) -> None:
+        # Plugin UI Safety: every Text sets its format, literals included.
         checked = 0
-        for match in re.finditer(r"\n\s*Text\s*\{", text):
-            start = match.end()
-            depth, idx = 1, start
-            while depth and idx < len(text):
-                depth += {"{": 1, "}": -1}.get(text[idx], 0)
-                idx += 1
-            block = text[start:idx]
-            if any(token in block for token in untrusted):
+        for path in sorted((ROOT / "qml").glob("*.qml")):
+            text = read_text(path)
+            for match in re.finditer(r"(?<![\w.])Text\s*\{", text):
+                start = match.end()
+                depth, idx = 1, start
+                while depth and idx < len(text):
+                    depth += {"{": 1, "}": -1}.get(text[idx], 0)
+                    idx += 1
                 checked += 1
-                self.assertIn("textFormat: Text.PlainText", block, block.strip()[:80])
-        self.assertGreaterEqual(checked, 3)
+                line = text.count("\n", 0, match.start()) + 1
+                with self.subTest(file=path.name, line=line):
+                    self.assertIn("textFormat: Text.PlainText", text[start:idx])
+        self.assertGreaterEqual(checked, 24)
+
+    def test_notification_text_is_plain(self) -> None:
+        # The toast renders a tag subset, so the one notify sink neutralizes it.
+        vault = read_text(ROOT / "qml" / "Vault.qml")
+        body = extract_function_body(vault, "notifyFailure")
+        self.assertIn("Model.plainNotification(String(message)", body)
+        uses = [line for line in (vault + panel_text()).splitlines() if "notifyCommand" in line]
+        self.assertEqual(len(uses), 3, uses)  # definition, notifyFailure, Panel alias
 
     def test_panel_height_ignores_toast_and_menu(self) -> None:
         panel = panel_text()

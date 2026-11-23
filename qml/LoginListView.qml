@@ -91,6 +91,7 @@ Item {
           anchors.leftMargin: Style.space(10)
           anchors.verticalCenter: parent.verticalCenter
           text: "󰍉"
+          textFormat: Text.PlainText
           color: list.panel.dim
           font.family: list.panel.contentFontFamily
           font.pixelSize: Style.font.body
@@ -282,6 +283,7 @@ Item {
           width: parent.width
           visible: list.panel.listError === "" && !list.panel.listLoading
           text: "Enter or Ctrl+N to add"
+          textFormat: Text.PlainText
           color: list.panel.dim
           font.family: list.panel.contentFontFamily
           font.pixelSize: Style.font.caption

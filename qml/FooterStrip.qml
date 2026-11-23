@@ -35,6 +35,7 @@ Item {
 
     Text {
       text: footer.statusOk ? "󰄬" : "󰀦"
+      textFormat: Text.PlainText
       color: footer.statusOk ? footer.panel.accentColor : footer.panel.urgentColor
       font.family: footer.panel.contentFontFamily
       font.pixelSize: Style.font.body

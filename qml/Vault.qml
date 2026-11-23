@@ -1,6 +1,7 @@
 import QtQuick
 import Quickshell
 import Quickshell.Io
+import "Model.js" as Model
 
 Item {
   id: root
@@ -17,12 +18,12 @@ Item {
 
   // The panel is closed once typing starts, so a failure is shown as an
   // Omarchy notification. It never carries the secret: only the helper's
-  // error text.
+  // error text, with markup made literal (the toast renders some tags).
   property var notifyCommand: ["/usr/share/omarchy/bin/omarchy-notification-send"]
 
   function notifyFailure(title, message) {
     Quickshell.execDetached(notifyCommand.concat(["-u", "critical", "--app-name", "omapass",
-      "omapass", title + ": " + String(message).substring(0, 400)]))
+      "omapass", title + ": " + Model.plainNotification(String(message).substring(0, 400))]))
   }
 
   function notifyTypeFailure(message) {

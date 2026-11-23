@@ -1,4 +1,5 @@
-// Login list helpers, pure JS without Qt. Panel imports via `import "Model.js" as Model`.
+// Login list and notification helpers, pure JS without Qt. Imported via
+// `import "Model.js" as Model`.
 
 function displayName(account, folder) {
   account = String(account || "")
@@ -190,4 +191,11 @@ function hyprBorder(sizeJson, colorJson) {
   }
   if (colors.length === 0) return null
   return { width: width, colors: colors, angle: angle }
+}
+
+// Notification body text with no markup. The Omarchy toast decodes entities,
+// escapes the rest, then restores <b>, <i>, <a href=...>, <br> and similar
+// tags. A space after each "<" and "&" keeps any tag or entity literal.
+function plainNotification(text) {
+  return String(text).replace(/([<&])(?=\S)/g, "$1 ")
 }

@@ -114,7 +114,8 @@ can still reach the wrong window (see below).
 The panel is closed by then, so a failure is shown as an Omarchy notification.
 It comes from `omarchy-notification-send`, with the app name "omapass" and the
 text "Autotype failed: " followed by the helper's message. It never carries the
-secret. The message is cut to 400 characters.
+secret. The message is cut to 400 characters. A space is inserted after any
+`<` or `&` that touches the next character, so tags and entities show as text.
 
 | Exit | Meaning |
 |---|---|

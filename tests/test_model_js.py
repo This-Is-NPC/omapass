@@ -195,3 +195,41 @@ class TestModelIdentity(unittest.TestCase):
         self.assertEqual(data["gone"], -1)
         self.assertEqual(data["empty"], -1)
         self.assertEqual(data["dup"], [True, True, False, False])
+
+
+NOTIFY_SCRIPT = """
+const fs = require("fs");
+const src = fs.readFileSync(process.argv[1], "utf8");
+const M = new Function(src + "; return {plainNotification};")();
+console.log(JSON.stringify(JSON.parse(process.argv[2]).map(M.plainNotification)));
+"""
+
+
+class TestPlainNotification(unittest.TestCase):
+    # The Omarchy toast decodes entities, then restores <b>, <a href>, <br> and
+    # similar tags, so markup-shaped helper text must reach it with neither.
+    CASES = {
+        '<img src="https://example.invalid/x">': '< img src="https://example.invalid/x">',
+        "<b>x</b>": "< b>x< /b>",
+        '<a href="https://example.invalid">y</a>': '< a href="https://example.invalid">y< /a>',
+        "line<br/>break": "line< br/>break",
+        "&lt;b&gt;x&lt;/b&gt;": "& lt;b& gt;x& lt;/b& gt;",
+        "&#60;i&#62;": "& #60;i& #62;",
+        "Focus changed to another window": "Focus changed to another window",
+        "a < b & c > d": "a < b & c > d",
+        "": "",
+    }
+
+    def test_markup_and_entities_stay_literal(self) -> None:
+        self.assertIsNotNone(NODE, "node is required (installed in the sandbox image)")
+        inputs = list(self.CASES)
+        out = subprocess.run(
+            [NODE, "-e", NOTIFY_SCRIPT, str(ROOT / "qml" / "Model.js"), json.dumps(inputs)],
+            capture_output=True,
+            text=True,
+            check=True,
+        ).stdout
+        for given, got in zip(inputs, json.loads(out)):
+            with self.subTest(given=given):
+                self.assertEqual(got, self.CASES[given])
+                self.assertNotRegex(got, r"[<&]\S")

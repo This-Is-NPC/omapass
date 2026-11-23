@@ -181,6 +181,7 @@ Column {
 
   Text {
     text: form.panel.addKind === "nostr" ? "New Nostr key" : "New login"
+    textFormat: Text.PlainText
     color: form.panel.foreground
     font.family: form.panel.contentFontFamily
     font.pixelSize: Style.font.body
@@ -233,6 +234,7 @@ Column {
 
   Text {
     text: "Folder"
+    textFormat: Text.PlainText
     color: form.panel.dim
     font.family: form.panel.contentFontFamily
     font.pixelSize: Style.font.caption
@@ -271,6 +273,7 @@ Column {
 
   Text {
     text: form.panel.addKind === "nostr" ? "Nickname" : "Account or nickname"
+    textFormat: Text.PlainText
     color: form.panel.dim
     font.family: form.panel.contentFontFamily
     font.pixelSize: Style.font.caption
@@ -315,6 +318,7 @@ Column {
     Text {
       Layout.fillWidth: true
       text: "Password"
+      textFormat: Text.PlainText
       color: form.panel.dim
       font.family: form.panel.contentFontFamily
       font.pixelSize: Style.font.caption

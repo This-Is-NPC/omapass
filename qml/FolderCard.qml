@@ -54,6 +54,7 @@ BorderSurface {
           id: countText
           anchors.centerIn: parent
           text: String(card.records.length)
+          textFormat: Text.PlainText
           color: card.panel.dim
           font.family: card.panel.contentFontFamily
           font.pixelSize: Style.font.caption

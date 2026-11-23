@@ -146,6 +146,13 @@ class TypeFailureMessages(VaultCase):
         self.assertEqual(argv[-1], "Autotype failed: Focus changed to another window")
         self.assertNotIn(SECRET, " ".join(argv))
 
+    def test_markup_in_the_helper_message_reaches_the_toast_as_text(self):
+        # The toast restores <b>, <a href> and the like after decoding entities.
+        self.s.open_panel()
+        argv = self.type_and_collect_notification(
+            8, '<b>x</b> <img src="https://example.invalid/x"> &lt;i&gt;')
+        self.assertEqual(argv[-1], 'Autotype failed: < b>x< /b> < img src="https://example.invalid/x"> & lt;i& gt;')
+
     def test_success_sends_no_notification(self):
         self.s.chord("shift", "Return")
         self.s.wait(lambda: self.s.helper_calls("type"), "a type call")
