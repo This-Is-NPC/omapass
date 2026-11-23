@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.this-is-npc.omapass",
   "name": "omapass",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "author": "howl",
   "license": "MIT",
   "description": "100% local. List, copy, and type logins from the native keyring.",
