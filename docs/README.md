@@ -12,7 +12,7 @@ This is every page in the omapass documentation, in the order you are likely to 
 ## In order you'll meet them
 
 **Getting started:**
-- [How to install and remove](how-to-install-and-remove.md) — add the plugin, update it by hand, take it off.
+- [How to install and remove](how-to-install-and-remove.md) — add the plugin, update it, take it off.
 - [Keyboard](keyboard.md) — which key does what in each part of the panel.
 - [Screens](screens.md) — what the panel shows and where it sits.
 

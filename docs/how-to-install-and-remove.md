@@ -1,7 +1,7 @@
 # How to install and remove omapass
 
-**The question:** How do I install omapass in the Omarchy shell, update it by
-hand, and take it off again? This page is enough on its own.
+**The question:** How do I install omapass in the Omarchy shell, update it,
+and take it off again? This page is enough on its own.
 
 ## Before you start
 
@@ -28,6 +28,17 @@ hand, and take it off again? This page is enough on its own.
    ```
 
    The panel opens with your logins. Press `Esc` to close it.
+
+## Update from GitHub
+
+```sh
+omarchy plugin update io.github.this-is-npc.omapass
+```
+
+The command fetches the repository, shows the changes and asks before it
+applies them. It only fast-forwards: with local changes in the plugin folder
+it stops and changes nothing. If the new version fails validation, it rolls
+back. Pass `--yes` to skip the question.
 
 ## Update by hand
 
@@ -59,7 +70,9 @@ omarchy-restart-shell
 omarchy plugin remove io.github.this-is-npc.omapass
 ```
 
-Removal does not delete keyring entries. Your logins stay in the gnome-keyring.
+The command asks for confirmation (`--yes` skips it), disables the plugin and
+deletes its folder. Removal does not delete keyring entries. Your logins stay
+in the gnome-keyring.
 
 ## What can go wrong
 

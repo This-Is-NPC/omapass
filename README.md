@@ -2,13 +2,27 @@
 
 100% local logins for the Omarchy shell: omapass lists, stores, copies and types them from the native gnome-keyring, and keeps an optional Nostr `nsec` in the same keyring. It is not a 1Password or Bitwarden client and it does not sync over Nostr.
 
-## Install
+## Install and remove
 
 ```sh
 omarchy plugin add https://github.com/This-Is-NPC/omapass.git --enable
 ```
 
-This clones the plugin into `~/.config/omarchy/plugins/` and enables it; the shell picks it up by itself. [How to install and remove](docs/how-to-install-and-remove.md) covers updates by hand and removal.
+This clones the plugin into `~/.config/omarchy/plugins/` and enables it; the shell picks it up by itself.
+
+To pull the latest version from GitHub, run:
+
+```sh
+omarchy plugin update io.github.this-is-npc.omapass
+```
+
+To remove it, run:
+
+```sh
+omarchy plugin remove io.github.this-is-npc.omapass
+```
+
+Removal disables the plugin and deletes its folder. It does not delete keyring entries: your logins stay in the gnome-keyring. [How to install and remove](docs/how-to-install-and-remove.md) has the details.
 
 ## Start here
 
